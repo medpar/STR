@@ -1,0 +1,9 @@
+Flask
+python-dotenv
+elevenlabs
+pydub
+langchain
+openai
+requests
+
+# pip install -r requirements.txt

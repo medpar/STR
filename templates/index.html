@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>TTS & Agent Interface</title>
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background-color: #f7f7f7;
+      margin: 0;
+      padding: 0;
+    }
+    .container {
+      max-width: 800px;
+      margin: 2rem auto;
+      background-color: #fff;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+      padding: 2rem;
+    }
+    h1 {
+      text-align: center;
+      color: #333;
+    }
+    textarea {
+      width: 100%;
+      padding: 0.75rem;
+      font-size: 1rem;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      resize: vertical;
+      min-height: 100px;
+    }
+    select, button {
+      margin-top: 1rem;
+      padding: 0.75rem 1.5rem;
+      font-size: 1rem;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: background-color 0.3s ease;
+    }
+    button {
+      color: #fff;
+      background-color: #007bff;
+    }
+    button:hover {
+      background-color: #0056b3;
+    }
+    .result {
+      margin-top: 1.5rem;
+      padding: 1rem;
+      border-top: 1px solid #ccc;
+    }
+    .result p {
+      font-size: 1rem;
+      color: #333;
+      margin: 0;
+    }
+    audio {
+      width: 100%;
+      margin-top: 0.5rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>TTS & Agent Interface</h1>
+    <textarea id="textInput" placeholder="Enter your text or query here..."></textarea>
+    <br>
+    <select id="modeSelect">
+      <option value="tts">Text-to-Speech</option>
+      <option value="agent">Agent Query (Weather/News/etc.)</option>
+    </select>
+    <br>
+    <button id="sendButton">Submit</button>
+    <div id="results"></div>
+  </div>
+  <script>
+    const textInput = document.getElementById("textInput");
+    const modeSelect = document.getElementById("modeSelect");
+    const sendButton = document.getElementById("sendButton");
+    const resultsDiv = document.getElementById("results");
+
+    async function sendRequest() {
+      const text = textInput.value.trim();
+      if (!text) {
+        alert("Please enter some text.");
+        return;
+      }
+      const mode = modeSelect.value;
+      const endpoint = mode === "agent" ? "/api/agent" : "/api/text-to-speech";
+      const payload = mode === "agent" ? { query: text } : { text };
+      
+      try {
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        const result = await response.json();
+        if (!response.ok) {
+          alert("Error: " + result.error);
+          return;
+        }
+        // Crea un nuevo bloque de resultado.
+        const resultBlock = document.createElement("div");
+        resultBlock.className = "result";
+        const textParagraph = document.createElement("p");
+        textParagraph.textContent = result.message;
+        const audioElement = document.createElement("audio");
+        audioElement.controls = true;
+        audioElement.src = result.audio_url;
+        resultBlock.appendChild(textParagraph);
+        resultBlock.appendChild(audioElement);
+        // Se añade al principio del historial.
+        resultsDiv.prepend(resultBlock);
+        textInput.value = "";
+      } catch (err) {
+        alert("Error connecting to server: " + err);
+      }
+    }
+
+    sendButton.addEventListener("click", sendRequest);
+
+    // Envía la consulta al pulsar Enter (sin Shift).
+    textInput.addEventListener("keydown", function(event) {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        sendRequest();
+      }
+    });
+  </script>
+</body>
+</html>
