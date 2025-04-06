@@ -5,5 +5,5 @@ pydub
 langchain
 openai
 requests
-
+audioop-lts
 # pip install -r requirements.txt

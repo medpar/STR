@@ -1,8 +1,7 @@
-# agents.py
 import os
 import logging
 from dotenv import load_dotenv
-from openai import OpenAI  # Usando el paquete OpenAI en modo OpenRouter
+from openai import OpenAI
 
 load_dotenv()
 
@@ -14,24 +13,19 @@ if not OPENROUTER_API_KEY:
     exit(1)
 
 def process_query(query: str) -> str:
+    """
+    Process an agent query using the OpenRouter API and return the broadcast text.
+    """
     system_prompt = (
-        "You are a professional radio broadcaster. Provide a natural, broadcast-style answer without any URLs, links, or references in your response."
+        "You are a professional radio broadcaster. Provide a natural, broadcast-style answer without any URLs, links, or references in your response. Answer in spanish from Spain. Use european format for all dates and units. Your response should always be in plain text, DO NOT use markdown. "
     )
-    # test
-    # Llamada a OpenRouter usando la sintaxis exacta proporcionada:
     client = OpenAI(
         base_url=OPENROUTER_API_BASE,
         api_key=OPENROUTER_API_KEY,
     )
     completion = client.chat.completions.create(
-        #extra_headers={},
-        #extra_body={},
-        model="deepseek/deepseek-chat",
-        # plugins=[{
-        #     "id":"web",
-        #     "max_results": 5,
-        #     "search_prompt": "A web search was conducted on `date`. Incorporate the following web search results into your response. IMPORTANT: DO NOT Cite them using markdown links."
-        # }],
+        model="openai/gpt-4o-mini:online",
+        #model="deepseek/deepseek-v3-base:free",
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": query}
@@ -41,6 +35,7 @@ def process_query(query: str) -> str:
     return response_text
 
 if __name__ == "__main__":
+    # Simple CLI for testing agent queries
     while True:
         user_query = input("Enter your query (or 'exit' to quit): ")
         if user_query.lower() == "exit":

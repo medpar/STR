@@ -1,135 +1,182 @@
 <!DOCTYPE html>
 <html>
-<head>
-  <meta charset="UTF-8">
-  <title>TTS & Agent Interface</title>
-  <style>
-    body {
-      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-      background-color: #f7f7f7;
-      margin: 0;
-      padding: 0;
-    }
-    .container {
-      max-width: 800px;
-      margin: 2rem auto;
-      background-color: #fff;
-      border-radius: 8px;
-      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-      padding: 2rem;
-    }
-    h1 {
-      text-align: center;
-      color: #333;
-    }
-    textarea {
-      width: 100%;
-      padding: 0.75rem;
-      font-size: 1rem;
-      border: 1px solid #ccc;
-      border-radius: 4px;
-      resize: vertical;
-      min-height: 100px;
-    }
-    select, button {
-      margin-top: 1rem;
-      padding: 0.75rem 1.5rem;
-      font-size: 1rem;
-      border: none;
-      border-radius: 4px;
-      cursor: pointer;
-      transition: background-color 0.3s ease;
-    }
-    button {
-      color: #fff;
-      background-color: #007bff;
-    }
-    button:hover {
-      background-color: #0056b3;
-    }
-    .result {
-      margin-top: 1.5rem;
-      padding: 1rem;
-      border-top: 1px solid #ccc;
-    }
-    .result p {
-      font-size: 1rem;
-      color: #333;
-      margin: 0;
-    }
-    audio {
-      width: 100%;
-      margin-top: 0.5rem;
-    }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <h1>TTS & Agent Interface</h1>
-    <textarea id="textInput" placeholder="Enter your text or query here..."></textarea>
-    <br>
-    <select id="modeSelect">
-      <option value="tts">Text-to-Speech</option>
-      <option value="agent">Agent Query (Weather/News/etc.)</option>
-    </select>
-    <br>
-    <button id="sendButton">Submit</button>
-    <div id="results"></div>
-  </div>
-  <script>
-    const textInput = document.getElementById("textInput");
-    const modeSelect = document.getElementById("modeSelect");
-    const sendButton = document.getElementById("sendButton");
-    const resultsDiv = document.getElementById("results");
-
-    async function sendRequest() {
-      const text = textInput.value.trim();
-      if (!text) {
-        alert("Please enter some text.");
-        return;
+  <head>
+    <meta charset="UTF-8" />
+    <title>STR Proyecto</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        margin: 0;
+        padding: 0;
+        background: #f7f7f7;
       }
-      const mode = modeSelect.value;
-      const endpoint = mode === "agent" ? "/api/agent" : "/api/text-to-speech";
-      const payload = mode === "agent" ? { query: text } : { text };
-      
-      try {
-        const response = await fetch(endpoint, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload)
-        });
-        const result = await response.json();
-        if (!response.ok) {
-          alert("Error: " + result.error);
+      .container {
+        max-width: 800px;
+        margin: 20px auto;
+      }
+      .tab {
+        overflow: hidden;
+        background-color: #333;
+      }
+      .tab button {
+        background-color: inherit;
+        border: none;
+        outline: none;
+        cursor: pointer;
+        padding: 14px 16px;
+        transition: 0.3s;
+        font-size: 17px;
+        color: white;
+      }
+      .tab button:hover {
+        background-color: #575757;
+      }
+      .tab button.active {
+        background-color: #575757;
+      }
+      .tabcontent {
+        display: none;
+        padding: 20px;
+        background-color: #fff;
+      }
+      textarea {
+        width: 100%;
+        padding: 10px;
+        font-size: 16px;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        resize: vertical;
+        min-height: 100px;
+      }
+      button.submit-btn {
+        margin-top: 10px;
+        padding: 10px 20px;
+        font-size: 16px;
+        border: none;
+        border-radius: 4px;
+        background-color: #007bff;
+        color: white;
+        cursor: pointer;
+      }
+      button.submit-btn:hover {
+        background-color: #0056b3;
+      }
+      .result {
+        margin-top: 20px;
+        padding: 10px;
+        border-top: 1px solid #ccc;
+      }
+      audio {
+        width: 100%;
+        margin-top: 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="tab">
+        <button
+          class="tablinks"
+          onclick="openTab(event, 'TTS')"
+          id="defaultTab"
+        >
+          Text-to-Speech
+        </button>
+        <button class="tablinks" onclick="openTab(event, 'Agent')">
+          Agent Query
+        </button>
+      </div>
+
+      <div id="TTS" class="tabcontent">
+        <h2>Text-to-Speech</h2>
+        <textarea
+          id="ttsInput"
+          placeholder="Enter text to convert to speech..."
+        ></textarea>
+        <br />
+        <button class="submit-btn" onclick="sendTTSRequest()">Submit</button>
+        <div id="ttsResult"></div>
+      </div>
+
+      <div id="Agent" class="tabcontent">
+        <h2>Agent Query</h2>
+        <textarea id="agentInput" placeholder="Enter your query..."></textarea>
+        <br />
+        <button class="submit-btn" onclick="sendAgentRequest()">Submit</button>
+        <div id="agentResult"></div>
+      </div>
+    </div>
+
+    <script>
+      function openTab(evt, tabName) {
+        var i, tabcontent, tablinks;
+        tabcontent = document.getElementsByClassName("tabcontent");
+        for (i = 0; i < tabcontent.length; i++) {
+          tabcontent[i].style.display = "none";
+        }
+        tablinks = document.getElementsByClassName("tablinks");
+        for (i = 0; i < tablinks.length; i++) {
+          tablinks[i].className = tablinks[i].className.replace(" active", "");
+        }
+        document.getElementById(tabName).style.display = "block";
+        evt.currentTarget.className += " active";
+      }
+      // Set default tab
+      document.getElementById("defaultTab").click();
+
+      async function sendTTSRequest() {
+        const text = document.getElementById("ttsInput").value.trim();
+        if (!text) {
+          alert("Please enter text for TTS.");
           return;
         }
-        // Crea un nuevo bloque de resultado.
-        const resultBlock = document.createElement("div");
-        resultBlock.className = "result";
-        const textParagraph = document.createElement("p");
-        textParagraph.textContent = result.message;
-        const audioElement = document.createElement("audio");
-        audioElement.controls = true;
-        audioElement.src = result.audio_url;
-        resultBlock.appendChild(textParagraph);
-        resultBlock.appendChild(audioElement);
-        // Se añade al principio del historial.
-        resultsDiv.prepend(resultBlock);
-        textInput.value = "";
-      } catch (err) {
-        alert("Error connecting to server: " + err);
+        try {
+          const response = await fetch("/api/tts", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text: text }),
+          });
+          const result = await response.json();
+          if (response.ok) {
+            let resultDiv = document.getElementById("ttsResult");
+            let html = `<p>${result.message}</p>`;
+            html += `<audio controls src="${result.audio_url}"></audio>`;
+            resultDiv.innerHTML = html;
+            document.getElementById("ttsInput").value = "";
+          } else {
+            alert("Error: " + result.error);
+          }
+        } catch (err) {
+          alert("Error connecting to server: " + err);
+        }
       }
-    }
 
-    sendButton.addEventListener("click", sendRequest);
-
-    // Envía la consulta al pulsar Enter (sin Shift).
-    textInput.addEventListener("keydown", function(event) {
-      if (event.key === "Enter" && !event.shiftKey) {
-        event.preventDefault();
-        sendRequest();
+      async function sendAgentRequest() {
+        const query = document.getElementById("agentInput").value.trim();
+        if (!query) {
+          alert("Please enter a query.");
+          return;
+        }
+        try {
+          const response = await fetch("/api/agent", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ query: query }),
+          });
+          const result = await response.json();
+          if (response.ok) {
+            let resultDiv = document.getElementById("agentResult");
+            let html = `<p>${result.message}</p>`;
+            html += `<audio controls src="${result.audio_url}"></audio>`;
+            resultDiv.innerHTML = html;
+            document.getElementById("agentInput").value = "";
+          } else {
+            alert("Error: " + result.error);
+          }
+        } catch (err) {
+          alert("Error connecting to server: " + err);
+        }
       }
-    });
-  </script>
-</body>
+    </script>
+  </body>
 </html>

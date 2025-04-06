@@ -1,0 +1,427 @@
+Directory structure:
+└── /./
+    ├── tts.py
+    ├── audio_manager.py
+    ├── agents.py
+    ├── app.py
+    └── templates/
+        └── index.html
+
+================================================
+File: /tts.py
+================================================
+import os
+import logging
+from datetime import datetime
+from audio_manager import save_stream_to_file, convert_mp3_to_wav, play_audio
+
+def generate_tts(text, client, voice_id, model_id, audio_dir):
+    """
+    Generate text-to-speech audio using the ElevenLabs API,
+    convert the audio to WAV format, and play it.
+    Returns a dict with message and filename information.
+    """
+    try:
+        stream = client.text_to_speech.convert_as_stream(
+            voice_id=voice_id,
+            output_format="mp3_44100_128",
+            text=text,
+            model_id=model_id,
+        )
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        mp3_filename = f"tts_{timestamp}.mp3"
+        wav_filename = f"tts_{timestamp}.wav"
+        mp3_filepath = os.path.join(audio_dir, mp3_filename)
+        wav_filepath = os.path.join(audio_dir, wav_filename)
+        
+        # Save the MP3 file from the streaming response
+        save_stream_to_file(stream, mp3_filepath)
+        # Convert MP3 to WAV for hardware playback
+        convert_mp3_to_wav(mp3_filepath, wav_filepath)
+        # Play the WAV file using the appropriate audio output command
+        play_audio(wav_filepath)
+        
+        return {
+            "message": text,
+            "mp3_filename": mp3_filename,
+            "wav_filepath": wav_filepath
+        }
+    except Exception as e:
+        logging.exception("Error generating TTS")
+        raise e
+
+
+================================================
+File: /audio_manager.py
+================================================
+import os
+import sys
+import subprocess
+import logging
+from pydub import AudioSegment
+
+def save_stream_to_file(stream, filepath):
+    """Save streaming data to a file."""
+    try:
+        with open(filepath, "wb") as f:
+            for chunk in stream:
+                f.write(chunk)
+        logging.info(f"File saved: {filepath}")
+    except Exception as e:
+        logging.exception("Error saving stream to file.")
+        raise e
+
+def convert_mp3_to_wav(mp3_filepath, wav_filepath):
+    """Convert an MP3 file to WAV format with desired settings."""
+    try:
+        audio = AudioSegment.from_mp3(mp3_filepath)
+        audio = audio.set_frame_rate(44100).set_sample_width(2).set_channels(2)
+        audio.export(wav_filepath, format="wav")
+        logging.info(f"Converted {mp3_filepath} to {wav_filepath}")
+    except Exception as e:
+        logging.exception("Error converting MP3 to WAV.")
+        raise e
+
+def play_audio(filepath):
+    """Play an audio file using system-specific command."""
+    try:
+        if sys.platform.startswith("linux"):
+            # Raspberry Pi: using aplay with PCM5102 DAC configuration
+            play_cmd = ["aplay", "-D", "plughw:1,0", filepath]
+        elif sys.platform == "darwin":
+            # macOS: using afplay
+            play_cmd = ["afplay", filepath]
+        else:
+            # Default fallback
+            play_cmd = ["aplay", filepath]
+        logging.info(f"Playing audio with command: {' '.join(play_cmd)}")
+        subprocess.run(play_cmd, check=True)
+    except Exception as e:
+        logging.exception("Error playing audio.")
+        raise e
+
+
+================================================
+File: /agents.py
+================================================
+import os
+import logging
+from dotenv import load_dotenv
+from openai import OpenAI
+
+load_dotenv()
+
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENROUTER_API_BASE = os.getenv("OPENROUTER_API_BASE", "https://openrouter.ai/api/v1")
+
+if not OPENROUTER_API_KEY:
+    logging.error("Falta OPENROUTER_API_KEY en el .env")
+    exit(1)
+
+def process_query(query: str) -> str:
+    """
+    Process an agent query using the OpenRouter API and return the broadcast text.
+    """
+    system_prompt = (
+        "You are a professional radio broadcaster. Provide a natural, broadcast-style answer without any URLs, links, or references in your response. Answer in spanish from Spain. Use european format for all dates and units. Your response should always be in plain text, DO NOT use markdown. "
+    )
+    client = OpenAI(
+        base_url=OPENROUTER_API_BASE,
+        api_key=OPENROUTER_API_KEY,
+    )
+    completion = client.chat.completions.create(
+        model="openai/gpt-4o-mini:online",
+        #model="deepseek/deepseek-v3-base:free",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": query}
+        ]
+    )
+    response_text = completion.choices[0].message.content.strip()
+    return response_text
+
+if __name__ == "__main__":
+    # Simple CLI for testing agent queries
+    while True:
+        user_query = input("Enter your query (or 'exit' to quit): ")
+        if user_query.lower() == "exit":
+            break
+        broadcast_response = process_query(user_query)
+        print("\nBroadcast Response:\n")
+        print(broadcast_response)
+        print("\n")
+
+
+================================================
+File: /app.py
+================================================
+import os
+import logging
+from flask import Flask, request, render_template, jsonify, send_from_directory
+from dotenv import load_dotenv
+from elevenlabs import ElevenLabs
+from agents import process_query
+from tts import generate_tts
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+
+# Load environment variables
+load_dotenv()
+
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+VOICE_ID = os.getenv("VOICE_ID")
+MODEL_ID = os.getenv("MODEL_ID")
+
+if not ELEVENLABS_API_KEY or not VOICE_ID or not MODEL_ID:
+    logging.error("Missing configuration in .env. Please set ELEVENLABS_API_KEY, VOICE_ID, and MODEL_ID.")
+    exit(1)
+
+# Set up audio directory
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+AUDIO_DIR = os.path.join(BASE_DIR, "audio_files")
+os.makedirs(AUDIO_DIR, exist_ok=True)
+
+# Initialize Flask app and ElevenLabs client
+app = Flask(__name__)
+client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
+
+@app.route('/audio_files/<path:filename>')
+def serve_audio(filename):
+    return send_from_directory(AUDIO_DIR, filename)
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/api/tts', methods=['POST'])
+def tts_endpoint():
+    data = request.get_json()
+    if not data or 'text' not in data:
+        return jsonify({'error': 'No text provided'}), 400
+    text = data['text']
+    logging.info(f"TTS request received: {text}")
+    try:
+        result = generate_tts(text, client, VOICE_ID, MODEL_ID, AUDIO_DIR)
+        audio_url = f"/audio_files/{result['mp3_filename']}"
+        return jsonify({
+            'message': result['message'],
+            'audio_url': audio_url
+        })
+    except Exception as e:
+        logging.exception("Error processing TTS request")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/agent', methods=['POST'])
+def agent_endpoint():
+    data = request.get_json()
+    if not data or 'query' not in data:
+        return jsonify({'error': 'No query provided'}), 400
+    query = data['query']
+    logging.info(f"Agent request received: {query}")
+    try:
+        # Process the agent query to generate broadcast text
+        broadcast_text = process_query(query)
+        logging.info(f"Broadcast text: {broadcast_text}")
+        # Convert broadcast text to speech using TTS module
+        result = generate_tts(broadcast_text, client, VOICE_ID, MODEL_ID, AUDIO_DIR)
+        audio_url = f"/audio_files/{result['mp3_filename']}"
+        return jsonify({
+            'message': broadcast_text,
+            'audio_url': audio_url
+        })
+    except Exception as e:
+        logging.exception("Error processing agent request")
+        return jsonify({'error': str(e)}), 500
+
+if __name__ == '__main__':
+    app.run(host="0.0.0.0", port=5000, debug=True)
+
+
+================================================
+File: /templates/index.html
+================================================
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>STR Proyecto</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        margin: 0;
+        padding: 0;
+        background: #f7f7f7;
+      }
+      .container {
+        max-width: 800px;
+        margin: 20px auto;
+      }
+      .tab {
+        overflow: hidden;
+        background-color: #333;
+      }
+      .tab button {
+        background-color: inherit;
+        border: none;
+        outline: none;
+        cursor: pointer;
+        padding: 14px 16px;
+        transition: 0.3s;
+        font-size: 17px;
+        color: white;
+      }
+      .tab button:hover {
+        background-color: #575757;
+      }
+      .tab button.active {
+        background-color: #575757;
+      }
+      .tabcontent {
+        display: none;
+        padding: 20px;
+        background-color: #fff;
+      }
+      textarea {
+        width: 100%;
+        padding: 10px;
+        font-size: 16px;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        resize: vertical;
+        min-height: 100px;
+      }
+      button.submit-btn {
+        margin-top: 10px;
+        padding: 10px 20px;
+        font-size: 16px;
+        border: none;
+        border-radius: 4px;
+        background-color: #007bff;
+        color: white;
+        cursor: pointer;
+      }
+      button.submit-btn:hover {
+        background-color: #0056b3;
+      }
+      .result {
+        margin-top: 20px;
+        padding: 10px;
+        border-top: 1px solid #ccc;
+      }
+      audio {
+        width: 100%;
+        margin-top: 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="tab">
+        <button
+          class="tablinks"
+          onclick="openTab(event, 'TTS')"
+          id="defaultTab"
+        >
+          Text-to-Speech
+        </button>
+        <button class="tablinks" onclick="openTab(event, 'Agent')">
+          Agent Query
+        </button>
+      </div>
+
+      <div id="TTS" class="tabcontent">
+        <h2>Text-to-Speech</h2>
+        <textarea
+          id="ttsInput"
+          placeholder="Enter text to convert to speech..."
+        ></textarea>
+        <br />
+        <button class="submit-btn" onclick="sendTTSRequest()">Submit</button>
+        <div id="ttsResult"></div>
+      </div>
+
+      <div id="Agent" class="tabcontent">
+        <h2>Agent Query</h2>
+        <textarea id="agentInput" placeholder="Enter your query..."></textarea>
+        <br />
+        <button class="submit-btn" onclick="sendAgentRequest()">Submit</button>
+        <div id="agentResult"></div>
+      </div>
+    </div>
+
+    <script>
+      function openTab(evt, tabName) {
+        var i, tabcontent, tablinks;
+        tabcontent = document.getElementsByClassName("tabcontent");
+        for (i = 0; i < tabcontent.length; i++) {
+          tabcontent[i].style.display = "none";
+        }
+        tablinks = document.getElementsByClassName("tablinks");
+        for (i = 0; i < tablinks.length; i++) {
+          tablinks[i].className = tablinks[i].className.replace(" active", "");
+        }
+        document.getElementById(tabName).style.display = "block";
+        evt.currentTarget.className += " active";
+      }
+      // Set default tab
+      document.getElementById("defaultTab").click();
+
+      async function sendTTSRequest() {
+        const text = document.getElementById("ttsInput").value.trim();
+        if (!text) {
+          alert("Please enter text for TTS.");
+          return;
+        }
+        try {
+          const response = await fetch("/api/tts", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text: text }),
+          });
+          const result = await response.json();
+          if (response.ok) {
+            let resultDiv = document.getElementById("ttsResult");
+            let html = `<p>${result.message}</p>`;
+            html += `<audio controls src="${result.audio_url}"></audio>`;
+            resultDiv.innerHTML = html;
+            document.getElementById("ttsInput").value = "";
+          } else {
+            alert("Error: " + result.error);
+          }
+        } catch (err) {
+          alert("Error connecting to server: " + err);
+        }
+      }
+
+      async function sendAgentRequest() {
+        const query = document.getElementById("agentInput").value.trim();
+        if (!query) {
+          alert("Please enter a query.");
+          return;
+        }
+        try {
+          const response = await fetch("/api/agent", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ query: query }),
+          });
+          const result = await response.json();
+          if (response.ok) {
+            let resultDiv = document.getElementById("agentResult");
+            let html = `<p>${result.message}</p>`;
+            html += `<audio controls src="${result.audio_url}"></audio>`;
+            resultDiv.innerHTML = html;
+            document.getElementById("agentInput").value = "";
+          } else {
+            alert("Error: " + result.error);
+          }
+        } catch (err) {
+          alert("Error connecting to server: " + err);
+        }
+      }
+    </script>
+  </body>
+</html>
+
+
