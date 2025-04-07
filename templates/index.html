@@ -85,6 +85,9 @@
         <button class="tablinks" onclick="openTab(event, 'Agent')">
           Agent Query
         </button>
+        <button class="tablinks" onclick="openTab(event, 'Realtime')">
+          Real-time Speech-to-Speech
+        </button>
       </div>
 
       <div id="TTS" class="tabcontent">
@@ -105,9 +108,69 @@
         <button class="submit-btn" onclick="sendAgentRequest()">Submit</button>
         <div id="agentResult"></div>
       </div>
+
+      <div id="Realtime" class="tabcontent">
+        <h2>Real-time Speech-to-Speech</h2>
+        <button id="startTalking">Start Talking</button>
+        <button id="stopTalking" disabled>Stop Talking</button>
+        <div id="realtimeStatus"></div>
+      </div>
     </div>
 
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.1/socket.io.js"></script>
     <script>
+      const socket = io("/realtime");
+
+      let audioContext;
+      let scriptProcessor;
+      let inputStream;
+
+      document
+        .getElementById("startTalking")
+        .addEventListener("click", async () => {
+          try {
+            const audioStream = await navigator.mediaDevices.getUserMedia({
+              audio: true,
+            });
+            audioContext = new AudioContext({ sampleRate: 24000 });
+            inputStream = audioContext.createMediaStreamSource(audioStream);
+            scriptProcessor = audioContext.createScriptProcessor(1024, 1, 1);
+            scriptProcessor.onaudioprocess = (event) => {
+              const inputBuffer = event.inputBuffer.getChannelData(0);
+              const int16Buffer = new Int16Array(inputBuffer.length);
+              for (let i = 0; i < inputBuffer.length; i++) {
+                int16Buffer[i] =
+                  Math.max(-1, Math.min(1, inputBuffer[i])) * 0x7fff;
+              }
+              socket.emit("audio_chunk", int16Buffer.buffer);
+            };
+            inputStream.connect(scriptProcessor);
+            scriptProcessor.connect(audioContext.destination);
+            document.getElementById("startTalking").disabled = true;
+            document.getElementById("stopTalking").disabled = false;
+            document.getElementById("realtimeStatus").innerText =
+              "Recording...";
+          } catch (err) {
+            console.error("Error accessing microphone:", err);
+          }
+        });
+
+      document.getElementById("stopTalking").addEventListener("click", () => {
+        if (scriptProcessor) {
+          scriptProcessor.disconnect();
+          inputStream.disconnect();
+          audioContext.close();
+          socket.emit("stop_talking");
+          document.getElementById("startTalking").disabled = false;
+          document.getElementById("stopTalking").disabled = true;
+          document.getElementById("realtimeStatus").innerText = "Processing...";
+        }
+      });
+
+      socket.on("status", (data) => {
+        console.log("Status:", data.message);
+      });
+
       function openTab(evt, tabName) {
         var i, tabcontent, tablinks;
         tabcontent = document.getElementsByClassName("tabcontent");
@@ -121,7 +184,6 @@
         document.getElementById(tabName).style.display = "block";
         evt.currentTarget.className += " active";
       }
-      // Set default tab
       document.getElementById("defaultTab").click();
 
       async function sendTTSRequest() {

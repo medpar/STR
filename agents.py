@@ -17,7 +17,7 @@ def process_query(query: str) -> str:
     Process an agent query using the OpenRouter API and return the broadcast text.
     """
     system_prompt = (
-        "You are a professional radio broadcaster. Provide a natural, broadcast-style answer without any URLs, links, or references in your response. Answer in spanish from Spain. Use european format for all dates and units. Your response should always be in plain text, DO NOT use markdown. "
+        "You are a professional radio broadcaster. Provide a natural, broadcast-style answer without any URLs, links, or references in your response. Answer in spanish from Spain. Use european format for all dates and units. Your response should always be in plain text, DO NOT use markdown. Answer in one or two paragraphs. "
     )
     client = OpenAI(
         base_url=OPENROUTER_API_BASE,

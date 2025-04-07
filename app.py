@@ -1,10 +1,12 @@
 import os
 import logging
 from flask import Flask, request, render_template, jsonify, send_from_directory
+from flask_socketio import SocketIO, emit
 from dotenv import load_dotenv
 from elevenlabs import ElevenLabs
 from agents import process_query
 from tts import generate_tts
+from realtime import RealtimeClient, INSTRUCTIONS
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -28,6 +30,12 @@ os.makedirs(AUDIO_DIR, exist_ok=True)
 # Initialize Flask app and ElevenLabs client
 app = Flask(__name__)
 client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
+
+# Initialize SocketIO
+socketio = SocketIO(app)
+
+# Initialize RealtimeClient
+realtime_client = RealtimeClient(instructions=INSTRUCTIONS, voice="alloy")
 
 @app.route('/audio_files/<path:filename>')
 def serve_audio(filename):
@@ -63,10 +71,8 @@ def agent_endpoint():
     query = data['query']
     logging.info(f"Agent request received: {query}")
     try:
-        # Process the agent query to generate broadcast text
         broadcast_text = process_query(query)
         logging.info(f"Broadcast text: {broadcast_text}")
-        # Convert broadcast text to speech using TTS module
         result = generate_tts(broadcast_text, client, VOICE_ID, MODEL_ID, AUDIO_DIR)
         audio_url = f"/audio_files/{result['mp3_filename']}"
         return jsonify({
@@ -77,5 +83,17 @@ def agent_endpoint():
         logging.exception("Error processing agent request")
         return jsonify({'error': str(e)}), 500
 
+@socketio.on('connect', namespace='/realtime')
+def handle_realtime_connect():
+    emit('status', {'message': 'Connected to real-time namespace'})
+
+@socketio.on('audio_chunk', namespace='/realtime')
+def handle_audio_chunk(data):
+    realtime_client.send_audio_chunk(data)
+
+@socketio.on('stop_talking', namespace='/realtime')
+def handle_stop_talking():
+    realtime_client.commit_and_respond()
+
 if __name__ == '__main__':
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    socketio.run(app, host="0.0.0.0", port=5000, debug=True)
