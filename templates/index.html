@@ -1,13 +1,12 @@
 <!DOCTYPE html>
-<html>
+<html lang="es">
   <head>
     <meta charset="UTF-8" />
-    <title>STR Proyecto</title>
+    <title>STR Proyecto</title>
     <style>
       body {
-        font-family: Arial, sans-serif;
+        font-family: Arial, Helvetica, sans-serif;
         margin: 0;
-        padding: 0;
         background: #f7f7f7;
       }
       .container {
@@ -16,28 +15,26 @@
       }
       .tab {
         overflow: hidden;
-        background-color: #333;
+        background: #333;
       }
       .tab button {
-        background-color: inherit;
         border: none;
-        outline: none;
+        outline: 0;
         cursor: pointer;
         padding: 14px 16px;
-        transition: 0.3s;
         font-size: 17px;
-        color: white;
+        color: #fff;
+        background: inherit;
+        transition: 0.3s;
       }
-      .tab button:hover {
-        background-color: #575757;
-      }
+      .tab button:hover,
       .tab button.active {
-        background-color: #575757;
+        background: #575757;
       }
       .tabcontent {
         display: none;
         padding: 20px;
-        background-color: #fff;
+        background: #fff;
       }
       textarea {
         width: 100%;
@@ -48,23 +45,18 @@
         resize: vertical;
         min-height: 100px;
       }
-      button.submit-btn {
+      .submit-btn {
         margin-top: 10px;
         padding: 10px 20px;
         font-size: 16px;
         border: none;
         border-radius: 4px;
-        background-color: #007bff;
-        color: white;
+        background: #007bff;
+        color: #fff;
         cursor: pointer;
       }
-      button.submit-btn:hover {
-        background-color: #0056b3;
-      }
-      .result {
-        margin-top: 20px;
-        padding: 10px;
-        border-top: 1px solid #ccc;
+      .submit-btn:hover {
+        background: #0056b3;
       }
       audio {
         width: 100%;
@@ -75,170 +67,122 @@
   <body>
     <div class="container">
       <div class="tab">
-        <button
-          class="tablinks"
-          onclick="openTab(event, 'TTS')"
-          id="defaultTab"
-        >
-          Text-to-Speech
+        <button class="tablinks" onclick="openTab(event,'TTS')" id="defaultTab">
+          Text‑to‑Speech
         </button>
-        <button class="tablinks" onclick="openTab(event, 'Agent')">
+        <button class="tablinks" onclick="openTab(event,'Agent')">
           Agent Query
         </button>
-        <button class="tablinks" onclick="openTab(event, 'Realtime')">
-          Real-time Speech-to-Speech
+        <button class="tablinks" onclick="openTab(event,'Realtime')">
+          Real‑time
         </button>
       </div>
 
+      <!-- -----------------  TTS  ----------------- -->
       <div id="TTS" class="tabcontent">
-        <h2>Text-to-Speech</h2>
-        <textarea
-          id="ttsInput"
-          placeholder="Enter text to convert to speech..."
-        ></textarea>
-        <br />
-        <button class="submit-btn" onclick="sendTTSRequest()">Submit</button>
+        <h2>Text‑to‑Speech</h2>
+        <textarea id="ttsInput" placeholder="Escribe texto…"></textarea><br />
+        <button class="submit-btn" onclick="sendTTSRequest()">Enviar</button>
         <div id="ttsResult"></div>
       </div>
 
+      <!-- -----------------  Agent  ---------------- -->
       <div id="Agent" class="tabcontent">
         <h2>Agent Query</h2>
-        <textarea id="agentInput" placeholder="Enter your query..."></textarea>
-        <br />
-        <button class="submit-btn" onclick="sendAgentRequest()">Submit</button>
+        <textarea id="agentInput" placeholder="Pregunta…"></textarea><br />
+        <button class="submit-btn" onclick="sendAgentRequest()">Enviar</button>
         <div id="agentResult"></div>
       </div>
 
+      <!-- ---------------  Realtime  --------------- -->
       <div id="Realtime" class="tabcontent">
-        <h2>Real-time Speech-to-Speech</h2>
+        <h2>Speech‑to‑Speech (micro USB local)</h2>
         <button id="startTalking">Start Talking</button>
         <button id="stopTalking" disabled>Stop Talking</button>
-        <div id="realtimeStatus"></div>
+        <div id="realtimeStatus" style="margin-top: 20px; color: #555"></div>
       </div>
     </div>
 
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.1/socket.io.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.4/socket.io.js"></script>
     <script>
       const socket = io("/realtime");
 
-      let audioContext;
-      let scriptProcessor;
-      let inputStream;
-
-      document
-        .getElementById("startTalking")
-        .addEventListener("click", async () => {
-          try {
-            const audioStream = await navigator.mediaDevices.getUserMedia({
-              audio: true,
-            });
-            audioContext = new AudioContext({ sampleRate: 24000 });
-            inputStream = audioContext.createMediaStreamSource(audioStream);
-            scriptProcessor = audioContext.createScriptProcessor(1024, 1, 1);
-            scriptProcessor.onaudioprocess = (event) => {
-              const inputBuffer = event.inputBuffer.getChannelData(0);
-              const int16Buffer = new Int16Array(inputBuffer.length);
-              for (let i = 0; i < inputBuffer.length; i++) {
-                int16Buffer[i] =
-                  Math.max(-1, Math.min(1, inputBuffer[i])) * 0x7fff;
-              }
-              socket.emit("audio_chunk", int16Buffer.buffer);
-            };
-            inputStream.connect(scriptProcessor);
-            scriptProcessor.connect(audioContext.destination);
-            document.getElementById("startTalking").disabled = true;
-            document.getElementById("stopTalking").disabled = false;
-            document.getElementById("realtimeStatus").innerText =
-              "Recording...";
-          } catch (err) {
-            console.error("Error accessing microphone:", err);
-          }
-        });
-
-      document.getElementById("stopTalking").addEventListener("click", () => {
-        if (scriptProcessor) {
-          scriptProcessor.disconnect();
-          inputStream.disconnect();
-          audioContext.close();
-          socket.emit("stop_talking");
-          document.getElementById("startTalking").disabled = false;
-          document.getElementById("stopTalking").disabled = true;
-          document.getElementById("realtimeStatus").innerText = "Processing...";
-        }
-      });
-
-      socket.on("status", (data) => {
-        console.log("Status:", data.message);
-      });
-
-      function openTab(evt, tabName) {
-        var i, tabcontent, tablinks;
-        tabcontent = document.getElementsByClassName("tabcontent");
-        for (i = 0; i < tabcontent.length; i++) {
-          tabcontent[i].style.display = "none";
-        }
-        tablinks = document.getElementsByClassName("tablinks");
-        for (i = 0; i < tablinks.length; i++) {
-          tablinks[i].className = tablinks[i].className.replace(" active", "");
-        }
-        document.getElementById(tabName).style.display = "block";
-        evt.currentTarget.className += " active";
+      /* ------------ tab UI ------------*/
+      function openTab(evt, name) {
+        Array.from(document.getElementsByClassName("tabcontent")).forEach(
+          (e) => (e.style.display = "none")
+        );
+        Array.from(document.getElementsByClassName("tablinks")).forEach((e) =>
+          e.classList.remove("active")
+        );
+        document.getElementById(name).style.display = "block";
+        evt.currentTarget.classList.add("active");
       }
       document.getElementById("defaultTab").click();
 
+      /* ------------ TTS ---------------*/
       async function sendTTSRequest() {
         const text = document.getElementById("ttsInput").value.trim();
         if (!text) {
-          alert("Please enter text for TTS.");
+          alert("Introduce texto");
           return;
         }
-        try {
-          const response = await fetch("/api/tts", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text: text }),
-          });
-          const result = await response.json();
-          if (response.ok) {
-            let resultDiv = document.getElementById("ttsResult");
-            let html = `<p>${result.message}</p>`;
-            html += `<audio controls src="${result.audio_url}"></audio>`;
-            resultDiv.innerHTML = html;
-            document.getElementById("ttsInput").value = "";
-          } else {
-            alert("Error: " + result.error);
-          }
-        } catch (err) {
-          alert("Error connecting to server: " + err);
-        }
+        const res = await fetch("/api/tts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text }),
+        });
+        const json = await res.json();
+        if (res.ok) {
+          document.getElementById(
+            "ttsResult"
+          ).innerHTML = `<p>${json.message}</p><audio controls src="${json.audio_url}"></audio>`;
+          document.getElementById("ttsInput").value = "";
+        } else alert(json.error);
       }
 
+      /* ------------ Agent -------------*/
       async function sendAgentRequest() {
         const query = document.getElementById("agentInput").value.trim();
         if (!query) {
-          alert("Please enter a query.");
+          alert("Introduce consulta");
           return;
         }
-        try {
-          const response = await fetch("/api/agent", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ query: query }),
-          });
-          const result = await response.json();
-          if (response.ok) {
-            let resultDiv = document.getElementById("agentResult");
-            let html = `<p>${result.message}</p>`;
-            html += `<audio controls src="${result.audio_url}"></audio>`;
-            resultDiv.innerHTML = html;
-            document.getElementById("agentInput").value = "";
-          } else {
-            alert("Error: " + result.error);
-          }
-        } catch (err) {
-          alert("Error connecting to server: " + err);
-        }
+        const res = await fetch("/api/agent", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query }),
+        });
+        const json = await res.json();
+        if (res.ok) {
+          document.getElementById(
+            "agentResult"
+          ).innerHTML = `<p>${json.message}</p><audio controls src="${json.audio_url}"></audio>`;
+          document.getElementById("agentInput").value = "";
+        } else alert(json.error);
       }
+
+      /* ------------ Realtime ----------*/
+      document.getElementById("startTalking").onclick = () => {
+        socket.emit("start_talking");
+        document.getElementById("startTalking").disabled = true;
+        document.getElementById("stopTalking").disabled = false;
+        document.getElementById("realtimeStatus").innerText = "Recording…";
+      };
+
+      document.getElementById("stopTalking").onclick = () => {
+        socket.emit("stop_talking");
+        document.getElementById("stopTalking").disabled = true;
+        document.getElementById("startTalking").disabled = false;
+        document.getElementById("realtimeStatus").innerText = "Processing…";
+      };
+
+      socket.on("status", (d) => {
+        document.getElementById("realtimeStatus").innerText = d.message;
+      });
+      socket.on("broadcast_text", (d) => {
+        document.getElementById("realtimeStatus").innerText = d.message;
+      });
     </script>
   </body>
 </html>

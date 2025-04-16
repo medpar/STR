@@ -1,5 +1,6 @@
 Directory structure:
 └── /./
+    ├── realtime.py
     ├── tts.py
     ├── audio_manager.py
     ├── agents.py
@@ -106,39 +107,37 @@ File: /agents.py
 ================================================
 import os
 import logging
+import re
 from dotenv import load_dotenv
 from openai import OpenAI
 
 load_dotenv()
 
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-OPENROUTER_API_BASE = os.getenv("OPENROUTER_API_BASE", "https://openrouter.ai/api/v1")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-if not OPENROUTER_API_KEY:
-    logging.error("Falta OPENROUTER_API_KEY en el .env")
+
+if not OPENAI_API_KEY:
+    logging.error("Falta API_KEY en el .env")
     exit(1)
 
 def process_query(query: str) -> str:
     """
     Process an agent query using the OpenRouter API and return the broadcast text.
     """
-    system_prompt = (
-        "You are a professional radio broadcaster. Provide a natural, broadcast-style answer without any URLs, links, or references in your response. Answer in spanish from Spain. Use european format for all dates and units. Your response should always be in plain text, DO NOT use markdown. "
+    instructions = (
+        "You are a professional radio broadcaster. Provide a natural, broadcast-style answer without any URLs, links, or references in your response. Answer in castillian spanish. Use european format for all dates and units. Your response should always be in plain text, DO NOT use markdown. Answer very very briefly in maximum one paragraph."
     )
-    client = OpenAI(
-        base_url=OPENROUTER_API_BASE,
-        api_key=OPENROUTER_API_KEY,
+    client = OpenAI()
+    response = client.responses.create(
+        model="gpt-4.1-mini",
+        tools=[{"type": "web_search_preview"}],
+        instructions=instructions,
+        input=query
     )
-    completion = client.chat.completions.create(
-        model="openai/gpt-4o-mini:online",
-        #model="deepseek/deepseek-v3-base:free",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": query}
-        ]
-    )
-    response_text = completion.choices[0].message.content.strip()
-    return response_text
+    raw_text = response.output_text
+    # Remove markdown links like ([text](url)) and surrounding whitespace
+    processed_text = re.sub(r'\s*\(\[([^\\\]]+)\]\(([^)]+)\)\)\s*', r'', raw_text).strip()
+    return processed_text
 
 if __name__ == "__main__":
     # Simple CLI for testing agent queries
@@ -158,10 +157,12 @@ File: /app.py
 import os
 import logging
 from flask import Flask, request, render_template, jsonify, send_from_directory
+from flask_socketio import SocketIO, emit
 from dotenv import load_dotenv
 from elevenlabs import ElevenLabs
 from agents import process_query
 from tts import generate_tts
+from realtime import RealtimeClient, INSTRUCTIONS
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -185,6 +186,12 @@ os.makedirs(AUDIO_DIR, exist_ok=True)
 # Initialize Flask app and ElevenLabs client
 app = Flask(__name__)
 client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
+
+# Initialize SocketIO
+socketio = SocketIO(app)
+
+# Initialize RealtimeClient
+realtime_client = RealtimeClient(instructions=INSTRUCTIONS, voice="alloy")
 
 @app.route('/audio_files/<path:filename>')
 def serve_audio(filename):
@@ -220,10 +227,8 @@ def agent_endpoint():
     query = data['query']
     logging.info(f"Agent request received: {query}")
     try:
-        # Process the agent query to generate broadcast text
         broadcast_text = process_query(query)
         logging.info(f"Broadcast text: {broadcast_text}")
-        # Convert broadcast text to speech using TTS module
         result = generate_tts(broadcast_text, client, VOICE_ID, MODEL_ID, AUDIO_DIR)
         audio_url = f"/audio_files/{result['mp3_filename']}"
         return jsonify({
@@ -234,9 +239,20 @@ def agent_endpoint():
         logging.exception("Error processing agent request")
         return jsonify({'error': str(e)}), 500
 
-if __name__ == '__main__':
-    app.run(host="0.0.0.0", port=5000, debug=True)
+@socketio.on('connect', namespace='/realtime')
+def handle_realtime_connect():
+    emit('status', {'message': 'Connected to real-time namespace'})
 
+@socketio.on('audio_chunk', namespace='/realtime')
+def handle_audio_chunk(data):
+    realtime_client.send_audio_chunk(data)
+
+@socketio.on('stop_talking', namespace='/realtime')
+def handle_stop_talking():
+    realtime_client.commit_and_respond()
+
+if __name__ == '__main__':
+    socketio.run(app, host="0.0.0.0", port=5000, debug=True)
 
 ================================================
 File: /templates/index.html
@@ -328,6 +344,9 @@ File: /templates/index.html
         <button class="tablinks" onclick="openTab(event, 'Agent')">
           Agent Query
         </button>
+        <button class="tablinks" onclick="openTab(event, 'Realtime')">
+          Real-time Speech-to-Speech
+        </button>
       </div>
 
       <div id="TTS" class="tabcontent">
@@ -348,9 +367,69 @@ File: /templates/index.html
         <button class="submit-btn" onclick="sendAgentRequest()">Submit</button>
         <div id="agentResult"></div>
       </div>
+
+      <div id="Realtime" class="tabcontent">
+        <h2>Real-time Speech-to-Speech</h2>
+        <button id="startTalking">Start Talking</button>
+        <button id="stopTalking" disabled>Stop Talking</button>
+        <div id="realtimeStatus"></div>
+      </div>
     </div>
 
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.1/socket.io.js"></script>
     <script>
+      const socket = io("/realtime");
+
+      let audioContext;
+      let scriptProcessor;
+      let inputStream;
+
+      document
+        .getElementById("startTalking")
+        .addEventListener("click", async () => {
+          try {
+            const audioStream = await navigator.mediaDevices.getUserMedia({
+              audio: true,
+            });
+            audioContext = new AudioContext({ sampleRate: 24000 });
+            inputStream = audioContext.createMediaStreamSource(audioStream);
+            scriptProcessor = audioContext.createScriptProcessor(1024, 1, 1);
+            scriptProcessor.onaudioprocess = (event) => {
+              const inputBuffer = event.inputBuffer.getChannelData(0);
+              const int16Buffer = new Int16Array(inputBuffer.length);
+              for (let i = 0; i < inputBuffer.length; i++) {
+                int16Buffer[i] =
+                  Math.max(-1, Math.min(1, inputBuffer[i])) * 0x7fff;
+              }
+              socket.emit("audio_chunk", int16Buffer.buffer);
+            };
+            inputStream.connect(scriptProcessor);
+            scriptProcessor.connect(audioContext.destination);
+            document.getElementById("startTalking").disabled = true;
+            document.getElementById("stopTalking").disabled = false;
+            document.getElementById("realtimeStatus").innerText =
+              "Recording...";
+          } catch (err) {
+            console.error("Error accessing microphone:", err);
+          }
+        });
+
+      document.getElementById("stopTalking").addEventListener("click", () => {
+        if (scriptProcessor) {
+          scriptProcessor.disconnect();
+          inputStream.disconnect();
+          audioContext.close();
+          socket.emit("stop_talking");
+          document.getElementById("startTalking").disabled = false;
+          document.getElementById("stopTalking").disabled = true;
+          document.getElementById("realtimeStatus").innerText = "Processing...";
+        }
+      });
+
+      socket.on("status", (data) => {
+        console.log("Status:", data.message);
+      });
+
       function openTab(evt, tabName) {
         var i, tabcontent, tablinks;
         tabcontent = document.getElementsByClassName("tabcontent");
@@ -364,7 +443,6 @@ File: /templates/index.html
         document.getElementById(tabName).style.display = "block";
         evt.currentTarget.className += " active";
       }
-      // Set default tab
       document.getElementById("defaultTab").click();
 
       async function sendTTSRequest() {
