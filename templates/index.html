@@ -2,187 +2,297 @@
 <html lang="es">
   <head>
     <meta charset="UTF-8" />
-    <title>STR Proyecto</title>
+    <title>STR Proyecto</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.4/socket.io.js"></script>
+  </head>
+  <body class="bg-gray-50 text-gray-900">
+    <div class="max-w-4xl mx-auto py-8 flex flex-col gap-6">
+      <!-- Title -->
+      <h1 class="text-3xl font-bold text-center">📡 Proyecto STR</h1>
+
+      <!-- Tabs -->
+      <nav class="flex gap-4 border-b pb-2" id="tabs">
+        <button data-tab="tts" class="tab active">TTS</button>
+        <button data-tab="agent" class="tab">Agent</button>
+        <button data-tab="realtime" class="tab">Realtime</button>
+        <button data-tab="pdf" class="tab">PDF</button>
+      </nav>
+
+      <!-- Panels -->
+      <!-- ------------ TTS ------------- -->
+      <section id="panel-tts" class="panel flex flex-col gap-4">
+        <div id="ttsFeed" class="feed"></div>
+
+        <div class="flex flex-col gap-2">
+          <textarea
+            id="ttsInput"
+            class="input-box"
+            placeholder="Escribe texto…"
+          ></textarea>
+          <div class="flex gap-2">
+            <button id="ttsSend" class="btn-primary">Enviar</button>
+            <button id="ttsClear" class="btn-secondary">Limpiar</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ------------ Agent ----------- -->
+      <section id="panel-agent" class="panel hidden flex flex-col gap-4">
+        <div id="agentFeed" class="feed"></div>
+
+        <div class="flex flex-col gap-2">
+          <textarea
+            id="agentInput"
+            class="input-box"
+            placeholder="Pregunta…"
+          ></textarea>
+          <div class="flex gap-2">
+            <button id="agentSend" class="btn-primary">Enviar</button>
+            <button id="agentClear" class="btn-secondary">Limpiar</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- -------- Realtime ------------ -->
+      <section id="panel-realtime" class="panel hidden flex flex-col gap-4">
+        <div id="realtimeFeed" class="feed"></div>
+
+        <div class="flex flex-col gap-4">
+          <div class="flex gap-2">
+            <button id="startTalking" class="btn-primary">🎙️ Start</button>
+            <button id="stopTalking" class="btn-secondary" disabled>
+              ⏹️ Stop
+            </button>
+            <button id="rtClear" class="btn-secondary">Limpiar</button>
+          </div>
+
+          <div class="flex gap-2">
+            <input
+              id="realtimeText"
+              class="input-box flex-grow"
+              placeholder="Enviar texto al aire…"
+            />
+            <button id="realtimeTextSend" class="btn-primary">Enviar</button>
+          </div>
+          <p id="realtimeStatus" class="text-sm text-gray-600"></p>
+        </div>
+      </section>
+
+      <!-- ------------- PDF ------------ -->
+      <section id="panel-pdf" class="panel hidden flex flex-col gap-4">
+        <div id="pdfFeed" class="feed"></div>
+
+        <div class="flex flex-col gap-2">
+          <input type="file" id="pdfFile" accept="application/pdf" />
+          <div class="flex gap-2">
+            <button id="pdfUpload" class="btn-primary">Subir</button>
+            <button id="pdfClear" class="btn-secondary">Limpiar</button>
+          </div>
+          <p id="pdfUploadStatus" class="text-sm text-gray-600"></p>
+
+          <input
+            id="pdfQuestion"
+            class="input-box"
+            placeholder="Pregunta sobre tu PDF…"
+            disabled
+          />
+          <button id="pdfAsk" class="btn-primary w-max" disabled>
+            Preguntar
+          </button>
+        </div>
+      </section>
+    </div>
+
     <style>
-      body {
-        font-family: Arial, Helvetica, sans-serif;
-        margin: 0;
-        background: #f7f7f7;
-      }
-      .container {
-        max-width: 800px;
-        margin: 20px auto;
-      }
       .tab {
-        overflow: hidden;
-        background: #333;
+        padding: 0.5rem 1rem;
+        border-bottom: 2px solid transparent;
       }
-      .tab button {
-        border: none;
-        outline: 0;
-        cursor: pointer;
-        padding: 14px 16px;
-        font-size: 17px;
-        color: #fff;
-        background: inherit;
-        transition: 0.3s;
+      .tab.active {
+        border-color: rgb(29 78 216);
+        color: rgb(29 78 216);
+        font-weight: 600;
       }
-      .tab button:hover,
-      .tab button.active {
-        background: #575757;
-      }
-      .tabcontent {
-        display: none;
-        padding: 20px;
-        background: #fff;
-      }
-      textarea {
-        width: 100%;
-        padding: 10px;
-        font-size: 16px;
+      .input-box {
+        padding: 0.5rem;
         border: 1px solid #ccc;
-        border-radius: 4px;
-        resize: vertical;
-        min-height: 100px;
+        border-radius: 0.375rem;
       }
-      .submit-btn {
-        margin-top: 10px;
-        padding: 10px 20px;
-        font-size: 16px;
-        border: none;
-        border-radius: 4px;
-        background: #007bff;
+      .feed {
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+        max-height: 400px;
+        overflow-y: auto;
+      }
+      .bubble {
+        padding: 0.75rem 1rem;
+        border-radius: 0.5rem;
+        max-width: 80%;
+      }
+      .user {
+        background: #e0f2fe;
+        align-self: flex-end;
+      }
+      .bot {
+        background: #f1f5f9;
+        align-self: flex-start;
+      }
+      .btn-primary {
+        background: rgb(29 78 216);
         color: #fff;
-        cursor: pointer;
+        padding: 0.5rem 1rem;
+        border-radius: 0.375rem;
       }
-      .submit-btn:hover {
-        background: #0056b3;
+      .btn-primary:hover {
+        background: rgb(30 64 175);
+      }
+      .btn-secondary {
+        background: rgb(75 85 99);
+        color: #fff;
+        padding: 0.5rem 1rem;
+        border-radius: 0.375rem;
+      }
+      .btn-secondary:hover {
+        background: rgb(55 65 81);
       }
       audio {
         width: 100%;
-        margin-top: 10px;
+        margin-top: 0.5rem;
       }
     </style>
-  </head>
-  <body>
-    <div class="container">
-      <div class="tab">
-        <button class="tablinks" onclick="openTab(event,'TTS')" id="defaultTab">
-          Text‑to‑Speech
-        </button>
-        <button class="tablinks" onclick="openTab(event,'Agent')">
-          Agent Query
-        </button>
-        <button class="tablinks" onclick="openTab(event,'Realtime')">
-          Real‑time
-        </button>
-      </div>
 
-      <!-- -----------------  TTS  ----------------- -->
-      <div id="TTS" class="tabcontent">
-        <h2>Text‑to‑Speech</h2>
-        <textarea id="ttsInput" placeholder="Escribe texto…"></textarea><br />
-        <button class="submit-btn" onclick="sendTTSRequest()">Enviar</button>
-        <div id="ttsResult"></div>
-      </div>
-
-      <!-- -----------------  Agent  ---------------- -->
-      <div id="Agent" class="tabcontent">
-        <h2>Agent Query</h2>
-        <textarea id="agentInput" placeholder="Pregunta…"></textarea><br />
-        <button class="submit-btn" onclick="sendAgentRequest()">Enviar</button>
-        <div id="agentResult"></div>
-      </div>
-
-      <!-- ---------------  Realtime  --------------- -->
-      <div id="Realtime" class="tabcontent">
-        <h2>Speech‑to‑Speech (micro USB local)</h2>
-        <button id="startTalking">Start Talking</button>
-        <button id="stopTalking" disabled>Stop Talking</button>
-        <div id="realtimeStatus" style="margin-top: 20px; color: #555"></div>
-      </div>
-    </div>
-
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.4/socket.io.js"></script>
     <script>
       const socket = io("/realtime");
+      const el = (sel) => document.querySelector(sel);
+      const feedClear = (sel) => {
+        el(sel).innerHTML = "";
+      };
 
-      /* ------------ tab UI ------------*/
-      function openTab(evt, name) {
-        Array.from(document.getElementsByClassName("tabcontent")).forEach(
-          (e) => (e.style.display = "none")
-        );
-        Array.from(document.getElementsByClassName("tablinks")).forEach((e) =>
-          e.classList.remove("active")
-        );
-        document.getElementById(name).style.display = "block";
-        evt.currentTarget.classList.add("active");
-      }
-      document.getElementById("defaultTab").click();
+      const appendBubble = (feedSel, text, who, audioUrl) => {
+        const div = document.createElement("div");
+        div.className = `bubble ${who}`;
+        div.innerHTML =
+          `<p>${text}</p>` +
+          (audioUrl ? `<audio controls src="${audioUrl}"></audio>` : "");
+        el(feedSel).appendChild(div);
+        div.scrollIntoView({ behavior: "smooth" });
+      };
 
-      /* ------------ TTS ---------------*/
-      async function sendTTSRequest() {
-        const text = document.getElementById("ttsInput").value.trim();
-        if (!text) {
-          alert("Introduce texto");
-          return;
-        }
-        const res = await fetch("/api/tts", {
+      /* ---------- tabs ---------- */
+      document.querySelectorAll("#tabs .tab").forEach((btn) => {
+        btn.onclick = () => {
+          document
+            .querySelectorAll("#tabs .tab")
+            .forEach((b) => b.classList.remove("active"));
+          btn.classList.add("active");
+          document
+            .querySelectorAll(".panel")
+            .forEach((p) => p.classList.add("hidden"));
+          el(`#panel-${btn.dataset.tab}`).classList.remove("hidden");
+        };
+      });
+
+      /* ---------- TTS ---------- */
+      el("#ttsSend").onclick = async () => {
+        const txt = el("#ttsInput").value.trim();
+        if (!txt) return;
+        appendBubble("#ttsFeed", txt, "user");
+        el("#ttsInput").value = "";
+        const r = await fetch("/api/tts", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text }),
+          body: JSON.stringify({ text: txt }),
         });
-        const json = await res.json();
-        if (res.ok) {
-          document.getElementById(
-            "ttsResult"
-          ).innerHTML = `<p>${json.message}</p><audio controls src="${json.audio_url}"></audio>`;
-          document.getElementById("ttsInput").value = "";
-        } else alert(json.error);
-      }
+        const j = await r.json();
+        if (r.ok) appendBubble("#ttsFeed", j.message, "bot", j.audio_url);
+        else alert(j.error);
+      };
+      el("#ttsClear").onclick = () => feedClear("#ttsFeed");
 
-      /* ------------ Agent -------------*/
-      async function sendAgentRequest() {
-        const query = document.getElementById("agentInput").value.trim();
-        if (!query) {
-          alert("Introduce consulta");
-          return;
-        }
-        const res = await fetch("/api/agent", {
+      /* ---------- Agent ---------- */
+      el("#agentSend").onclick = async () => {
+        const q = el("#agentInput").value.trim();
+        if (!q) return;
+        appendBubble("#agentFeed", q, "user");
+        el("#agentInput").value = "";
+        const r = await fetch("/api/agent", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query }),
+          body: JSON.stringify({ query: q }),
         });
-        const json = await res.json();
-        if (res.ok) {
-          document.getElementById(
-            "agentResult"
-          ).innerHTML = `<p>${json.message}</p><audio controls src="${json.audio_url}"></audio>`;
-          document.getElementById("agentInput").value = "";
-        } else alert(json.error);
-      }
+        const j = await r.json();
+        if (r.ok) appendBubble("#agentFeed", j.message, "bot", j.audio_url);
+        else alert(j.error);
+      };
+      el("#agentClear").onclick = () => feedClear("#agentFeed");
 
-      /* ------------ Realtime ----------*/
-      document.getElementById("startTalking").onclick = () => {
+      /* ---------- Realtime mic+text ---------- */
+      el("#startTalking").onclick = () => {
         socket.emit("start_talking");
-        document.getElementById("startTalking").disabled = true;
-        document.getElementById("stopTalking").disabled = false;
-        document.getElementById("realtimeStatus").innerText = "Recording…";
+        el("#startTalking").disabled = true;
+        el("#stopTalking").disabled = false;
       };
-
-      document.getElementById("stopTalking").onclick = () => {
+      el("#stopTalking").onclick = () => {
         socket.emit("stop_talking");
-        document.getElementById("stopTalking").disabled = true;
-        document.getElementById("startTalking").disabled = false;
-        document.getElementById("realtimeStatus").innerText = "Processing…";
+        el("#stopTalking").disabled = true;
+        el("#startTalking").disabled = false;
       };
+      el("#realtimeTextSend").onclick = () => {
+        const msg = el("#realtimeText").value.trim();
+        if (!msg) return;
+        appendBubble("#realtimeFeed", msg, "user");
+        el("#realtimeText").value = "";
+        socket.emit("send_text", { text: msg });
+      };
+      el("#rtClear").onclick = () => feedClear("#realtimeFeed");
+      socket.on(
+        "status",
+        (d) => (el("#realtimeStatus").textContent = d.message)
+      );
+      socket.on("broadcast_text", (d) =>
+        appendBubble("#realtimeFeed", d.message, "bot")
+      );
 
-      socket.on("status", (d) => {
-        document.getElementById("realtimeStatus").innerText = d.message;
-      });
-      socket.on("broadcast_text", (d) => {
-        document.getElementById("realtimeStatus").innerText = d.message;
-      });
+      /* ---------- PDF ---------- */
+      let currentPDF = null;
+      el("#pdfUpload").onclick = async () => {
+        const f = el("#pdfFile").files[0];
+        if (!f) {
+          alert("Elige un PDF");
+          return;
+        }
+        const fd = new FormData();
+        fd.append("file", f);
+        el("#pdfUploadStatus").textContent = "Subiendo…";
+        const r = await fetch("/api/pdf/upload", { method: "POST", body: fd });
+        const j = await r.json();
+        if (r.ok) {
+          currentPDF = j.filename;
+          el("#pdfUploadStatus").textContent = `PDF cargado: ${currentPDF}`;
+          el("#pdfQuestion").disabled = false;
+          el("#pdfAsk").disabled = false;
+        } else {
+          alert(j.error);
+          el("#pdfUploadStatus").textContent = "";
+        }
+      };
+      el("#pdfAsk").onclick = async () => {
+        const q = el("#pdfQuestion").value.trim();
+        if (!q || !currentPDF) return;
+        appendBubble("#pdfFeed", q, "user");
+        el("#pdfQuestion").value = "";
+        const r = await fetch("/api/pdf/ask", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question: q, filename: currentPDF }),
+        });
+        const j = await r.json();
+        if (r.ok) appendBubble("#pdfFeed", j.answer, "bot", j.audio_url);
+        else alert(j.error);
+      };
+      el("#pdfClear").onclick = () => feedClear("#pdfFeed");
     </script>
   </body>
 </html>
