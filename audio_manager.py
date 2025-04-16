@@ -31,7 +31,7 @@ def play_audio(filepath):
     try:
         if sys.platform.startswith("linux"):
             # Raspberry Pi: using aplay with PCM5102 DAC configuration
-            play_cmd = ["aplay", "-D", "plughw:1,0", filepath]
+            play_cmd = ["aplay", "-D", "plughw:0,0", filepath]
         elif sys.platform == "darwin":
             # macOS: using afplay
             play_cmd = ["afplay", filepath]
