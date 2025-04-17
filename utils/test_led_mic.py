@@ -5,8 +5,9 @@ LED on GPIO27 lights while recording.
 WAV saved to ./recordings/rec_YYYYMMDD‑HHMMSS.wav at 48 kHz.
 """
 
-import os, time, wave, threading, datetime
+import os, time, wave, threading, datetime, sys
 import numpy as np, pyaudio, RPi.GPIO as GPIO
+
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from config import SAMPLE_RATE, NUM_CHANNELS, FRAME_CHUNK, MIC_DEVICE_INDEX, \
