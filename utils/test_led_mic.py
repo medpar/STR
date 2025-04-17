@@ -10,7 +10,10 @@ without running the whole Flask app.
 
 import os, time, threading, wave, logging
 import numpy as np, pyaudio
-from .config import (
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).parent.parent))
+from config import (
     MIC_DEVICE_INDEX, SAMPLE_RATE, FRAME_CHUNK, NUM_CHANNELS,
     NORMALISE_INPUT, GPIO_BUTTON_PIN, GPIO_LED_PIN,
 )
