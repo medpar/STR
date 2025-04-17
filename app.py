@@ -1,21 +1,13 @@
 #!/usr/bin/env python3
 """
-Flask / Flask‑SocketIO server for STR.
+Flask / Flask‑SocketIO server for STR, now with PDF concepts & questions.
 """
 
 from __future__ import annotations
-
 import os
 import logging
-
 from dotenv import load_dotenv
-from flask import (
-    Flask,
-    jsonify,
-    render_template,
-    request,
-    send_from_directory,
-)
+from flask import Flask, jsonify, render_template, request, send_from_directory
 from flask_socketio import SocketIO, emit
 from elevenlabs import ElevenLabs
 from openai import OpenAI
@@ -23,19 +15,18 @@ from openai import OpenAI
 from agents import process_query
 from tts import generate_tts
 from realtime import RealtimeClient, INSTRUCTIONS
-from file_manager import PDFManager
-from config import MIC_DEVICE_INDEX   # <<<<<< NEW
+from files import PDFManager
+from config import MIC_DEVICE_INDEX
+from config import MIC_DEVICE_INDEX, VECTOR_STORE_ID
 
-# ------------------------------------------------------------------#
-#  Config                                                           #
-# ------------------------------------------------------------------#
+
+# ------------------------------------------------------------------
 logging.basicConfig(level=logging.INFO)
 load_dotenv()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 AUDIO_DIR = os.path.join(BASE_DIR, "audio_files")
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
-
 os.makedirs(AUDIO_DIR, exist_ok=True)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -47,41 +38,27 @@ if not all([ELEVENLABS_API_KEY, VOICE_ID, MODEL_ID]):
 
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*")
-
 eleven_client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
 openai_client = OpenAI()
+pdf_manager = PDFManager(UPLOAD_DIR, VECTOR_STORE_ID)
 
-pdf_manager = PDFManager(UPLOAD_DIR)
-
-
-# ------------------------------------------------------------------#
-#  Realtime client                                                  #
-# ------------------------------------------------------------------#
 def _broadcast(msg: str):
     socketio.emit("broadcast_text", {"message": msg}, namespace="/realtime")
-
 
 realtime_client = RealtimeClient(
     instructions=INSTRUCTIONS,
     voice="ash",
-    mic_index=MIC_DEVICE_INDEX,      # <<<<<< NEW
+    mic_index=MIC_DEVICE_INDEX,
     on_text=_broadcast,
 )
 
-
-
-# ------------------------------------------------------------------#
-#  Static / HTML                                                    #
-# ------------------------------------------------------------------#
 @app.route("/")
 def index():
     return render_template("index.html")
 
-
 @app.route("/audio_files/<path:filename>")
 def serve_audio(filename):
     return send_from_directory(AUDIO_DIR, filename)
-
 
 # ------------------------------------------------------------------#
 #  TTS                                                              #
@@ -112,18 +89,17 @@ def agent_endpoint():
     )
 
 
-# ------------------------------------------------------------------#
-#  PDF – upload & ask                                               #
-# ------------------------------------------------------------------#
+# ------------------------------------------------------------------
+# PDF – upload & ask & concepts & questions
+# ------------------------------------------------------------------
 @app.route("/api/pdf/upload", methods=["POST"])
 def pdf_upload():
     try:
         info = pdf_manager.upload(request.files.get("file"))
         return jsonify(info)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logging.exception("PDF upload failed")
         return jsonify({"error": str(exc)}), 400
-
 
 @app.route("/api/pdf/ask", methods=["POST"])
 def pdf_ask():
@@ -134,14 +110,34 @@ def pdf_ask():
         return jsonify({"error": "Invalid request"}), 400
     try:
         answer = pdf_manager.ask(filename, question)
-    except Exception as exc:  # noqa: BLE001
+        res = generate_tts(answer, eleven_client, VOICE_ID, MODEL_ID, AUDIO_DIR)
+        return jsonify({"answer": answer, "audio_url": f"/audio_files/{res['mp3_filename']}"})
+    except Exception as exc:
         logging.exception("PDF ask error")
         return jsonify({"error": str(exc)}), 400
-    res = generate_tts(answer, eleven_client, VOICE_ID, MODEL_ID, AUDIO_DIR)
-    return jsonify(
-        {"answer": answer, "audio_url": f"/audio_files/{res['mp3_filename']}"}
-    )
+@app.route("/api/pdf/concepts", methods=["POST"])
+def pdf_concepts():
+    data = request.get_json() or {}
+    fn   = data.get("filename")
+    if not fn: return jsonify({"error":"No filename"}),400
+    try:
+        concepts = pdf_manager.concepts(fn)
+        return jsonify({"concepts":concepts})
+    except Exception as e:
+        logging.exception("PDF concepts error")
+        return jsonify({"error":str(e)}),400
 
+@app.route("/api/pdf/questions", methods=["POST"])
+def pdf_questions():
+    data = request.get_json() or {}
+    fn   = data.get("filename")
+    if not fn: return jsonify({"error":"No filename"}),400
+    try:
+        questions = pdf_manager.questions(fn)
+        return jsonify({"questions":questions})
+    except Exception as e:
+        logging.exception("PDF questions error")
+        return jsonify({"error":str(e)}),400
 
 # ------------------------------------------------------------------#
 #  SocketIO – realtime                                              #

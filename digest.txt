@@ -1,25 +1,150 @@
 Directory structure:
 └── /./
+    ├── files.py
     ├── config.py
     ├── realtime.py
     ├── tts.py
     ├── audio_manager.py
     ├── agents.py
+    ├── setup.py
     ├── gpio_controller.py
     ├── app.py
-    ├── templates/
-    │   └── index.html
-    └── file_manager.py
+    └── templates/
+        └── index.html
+
+================================================
+File: /files.py
+================================================
+#!/usr/bin/env python3
+"""
+PDF upload + question‑answering logic, isolated from the Flask app.
+
+• Uploads a PDF to the OpenAI Files endpoint and keeps the mapping
+  filename → file_id in memory.
+• Adds each file to your vector store (indexing happens asynchronously).
+• Answers questions with the file_search tool.
+• Provides `concepts()` and `questions()` helpers for the UI.
+"""
+
+import os
+import logging
+from typing import Dict, List
+
+from openai import OpenAI
+
+log = logging.getLogger(__name__)
+
+
+class PDFManager:
+    """In‑memory PDF store + vector‑store indexing + file_search Q&A."""
+
+    def __init__(self, upload_dir: str, vector_store_id: str):
+        self.upload_dir = upload_dir
+        os.makedirs(self.upload_dir, exist_ok=True)
+        self.client = OpenAI()
+        self._store: Dict[str, str] = {}  # filename → file_id
+        self.vector_store_id = vector_store_id
+
+    def upload(self, werkzeug_file) -> dict:
+        """
+        1. Save PDF locally
+        2. Upload to OpenAI Files (purpose="assistants")
+        3. Add to vector store
+        Returns {"file_id": ..., "filename": ...}
+        (Indexing is kicked off but not awaited.)
+        """
+        if not werkzeug_file or not werkzeug_file.filename.lower().endswith(".pdf"):
+            raise ValueError("A PDF file is required.")
+
+        filename = werkzeug_file.filename
+        local_path = os.path.join(self.upload_dir, filename)
+        werkzeug_file.save(local_path)
+
+        # 1) Upload to Files API
+        with open(local_path, "rb") as f:
+            openai_file = self.client.files.create(file=f, purpose="assistants")
+        file_id = openai_file.id
+        self._store[filename] = file_id
+        log.info("Uploaded PDF %s → file_id=%s", filename, file_id)
+
+        # 2) Add to Vector Store (indexing runs in background)
+        self.client.vector_stores.files.create(
+            vector_store_id=self.vector_store_id,
+            file_id=file_id
+        )
+        log.info("Vector‑store indexing started for file_id=%s", file_id)
+
+        return {"file_id": file_id, "filename": filename}
+
+    def ask(self, filename: str, question: str) -> str:
+        """
+        Ask a free‑form question using Responses API + file_search tool.
+        """
+        if filename not in self._store:
+            raise ValueError("File not found. Upload first.")
+
+        fs_tool = {
+            "type": "file_search",
+            "vector_store_ids": [self.vector_store_id],
+            "max_num_results": 5
+        }
+
+        resp = self.client.responses.create(
+            model="gpt-4.1-mini",
+            input=question,
+            tools=[fs_tool]
+        )
+
+        # collect all output_text chunks from the assistant message
+        texts: List[str] = []
+        for out in resp.output:
+            # out.type is e.g. "file_search_call" or "message"
+            if getattr(out, "type", None) == "message":
+                # out.content is a list of content blocks
+                for block in out.content:
+                    if getattr(block, "type", None) == "output_text":
+                        # block.text contains the actual assistant text
+                        texts.append(block.text)
+
+        return " ".join(texts).strip()
+
+    def concepts(self, filename: str) -> List[str]:
+        """
+        Return a list of the key concepts in the document.
+        """
+        raw = self.ask(
+            filename,
+            "Por favor, enumera los conceptos clave tratados en este documento, uno por línea."
+        )
+        lines = [
+            line.strip(" \u2022-0123456789. ")
+            for line in raw.splitlines()
+            if line.strip()
+        ]
+        return lines
+
+    def questions(self, filename: str) -> List[str]:
+        """
+        Generate a short set of test questions about the document.
+        """
+        raw = self.ask(
+            filename,
+            "Genera cinco preguntas de prueba sobre el contenido de este documento, una por línea."
+        )
+        lines = [
+            line.strip(" \u2022-0123456789. ")
+            for line in raw.splitlines()
+            if line.strip()
+        ]
+        return lines
+
 
 ================================================
 File: /config.py
 ================================================
 #!/usr/bin/env python3
 """
-Centralised STR hardware/audio/GPIO settings.
-
-Edit this file (or override with ENV vars) whenever the USB‑mic or DAC
-IDs change – no need to touch the rest of the code.
+Centralised STR hardware/audio/GPIO settings (plus vector store).
 """
 
 import os
@@ -28,13 +153,10 @@ import os
 #  Audio (USB mic)                                                  #
 # ------------------------------------------------------------------#
 MIC_DEVICE_INDEX: int = int(os.getenv("MIC_DEVICE_INDEX", "1"))
-
-# Set to 0 to auto‑query the mic’s native rate each time
-MIC_SAMPLE_RATE: int = int(os.getenv("MIC_SAMPLE_RATE", "0"))
-
-MIC_CHANNELS: int = int(os.getenv("MIC_CHANNELS", "1"))
-MIC_CHUNK: int = int(os.getenv("MIC_CHUNK", "1024"))
-MIC_NORMALISE: bool = os.getenv("MIC_NORMALISE", "1") == "1"
+MIC_SAMPLE_RATE: int  = int(os.getenv("MIC_SAMPLE_RATE", "0"))
+MIC_CHANNELS: int     = int(os.getenv("MIC_CHANNELS",    "1"))
+MIC_CHUNK: int        = int(os.getenv("MIC_CHUNK",      "1024"))
+MIC_NORMALISE: bool   = os.getenv("MIC_NORMALISE",      "1") == "1"
 
 # ------------------------------------------------------------------#
 #  Playback (PCM5102 DAC via aplay)                                 #
@@ -44,11 +166,17 @@ DAC_APLAY_DEVICE: str = os.getenv("DAC_APLAY_DEVICE", "plughw:2,0")
 # ------------------------------------------------------------------#
 #  GPIO – push‑button + LED                                         #
 # ------------------------------------------------------------------#
-GPIO_BUTTON_PIN: int = int(os.getenv("GPIO_BUTTON_PIN", "17"))   # BCM
-GPIO_LED_PIN: int    = int(os.getenv("GPIO_LED_PIN", "27"))
-
-# External resistor pull‑down (True = button pulls GPIO *high* when pressed)
+GPIO_BUTTON_PIN: int  = int(os.getenv("GPIO_BUTTON_PIN", "17"))
+GPIO_LED_PIN:   int   = int(os.getenv("GPIO_LED_PIN",    "27"))
 BUTTON_ACTIVE_HIGH: bool = True
+
+# ------------------------------------------------------------------#
+#  OpenAI Vector Store for File Search                              #
+#  Set VECTOR_STORE_ID to your existing vector store in ENV         #
+# ------------------------------------------------------------------#
+VECTOR_STORE_ID: str = os.getenv("VECTOR_STORE_ID", "")
+if not VECTOR_STORE_ID:
+    raise RuntimeError("Please set VECTOR_STORE_ID in your environment")
 
 
 ================================================
@@ -56,36 +184,35 @@ File: /realtime.py
 ================================================
 #!/usr/bin/env python3
 """
-Realtime speech‑to‑speech for STR.
+Realtime speech-to-speech for STR.
 
-• Streams USB‑mic audio (with optional normalisation) or typed text
-  to OpenAI Realtime API and plays voice replies through the DAC.
-• Push‑button + LED on Raspberry Pi toggle recording in hardware.
-• Web‑UI “Start/Stop” buttons work in parallel.
+• Records from USB mic at 48 kHz, downsamples to 24 kHz for OpenAI streaming.
+• Streams audio or typed text to OpenAI Realtime API and plays back at 24 kHz.
+• Toggles recording via web buttons or physical push‑button (GPIO17),
+  lights LED (GPIO27) while recording.
+• Uses external 10 kΩ pull‑down resistor on the button when available.
 
-Electrical wiring (BCM numbering):
-
-  ┌────────────────────────────┐
-  │ 10 kΩ pull‑down resistor    │
-  │   (GPIO‑>GND)              │
-  └────────┬───────────────────┘
-           │
-3 V3 ─────►┴───┐
-               │   Push‑button
-GPIO17 ◄───────┘
-               │
-GND  ──────────┘
-
-LED anode  ──► 330 Ω resistor ─► GPIO27  
-LED cathode ──► GND
 """
 
 from __future__ import annotations
+import os
+import ssl
+import json
+import base64
+import asyncio
+import threading
+import logging
 
-import asyncio, base64, json, logging, os, ssl, threading
-from typing import Callable, Optional
+import pyaudio
+import numpy as np
+import websockets  # ==13.*
 
-import pyaudio, numpy as np, websockets           # websockets==13.*
+# Try to import RPi.GPIO; if unavailable, disable GPIO features
+try:
+    import RPi.GPIO as GPIO
+    HAS_GPIO = True
+except ImportError:
+    HAS_GPIO = False
 
 from config import (
     MIC_DEVICE_INDEX,
@@ -99,137 +226,146 @@ from config import (
     BUTTON_ACTIVE_HIGH,
 )
 
-# ------------------------------------------------------------------#
-#  Logging                                                          #
-# ------------------------------------------------------------------#
+# ----------------------------------------------------------------------
+# Logging
+# ----------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)5s | %(name)s | %(message)s",
 )
 log = logging.getLogger("realtime")
 
-# ------------------------------------------------------------------#
-#  Prompt                                                           #
-# ------------------------------------------------------------------#
+# ----------------------------------------------------------------------
+# Constants
+# ----------------------------------------------------------------------
+API_SAMPLE_RATE = 24000  # OpenAI Realtime expects 24 kHz
+
+# ----------------------------------------------------------------------
+# Prompt
+# ----------------------------------------------------------------------
 INSTRUCTIONS = (
     "You are a professional radio broadcaster. Provide a natural, "
-    "broadcast‑style answer. Answer in Spanish from Spain. Use European "
+    "broadcast-style answer. Answer in Spanish from Spain. Use European "
     "format for all dates and units. Do not say anything in your first "
-    "message except 'Voice real time mode started.'. Answer briefly."
+    "message except 'Started'. Answer briefly."
 )
 
-# ------------------------------------------------------------------#
-#  Audio handler                                                    #
-# ------------------------------------------------------------------#
+# ----------------------------------------------------------------------
+# AudioHandler
+# ----------------------------------------------------------------------
 class AudioHandler:
-    """USB‑mic capture and local speaker playback."""
+    """Handle mic capture at MIC_SAMPLE_RATE and playback at 24 kHz."""
 
     def __init__(self, device_index: int):
         self.device_index = device_index
         self.channels = MIC_CHANNELS
         self.chunk = MIC_CHUNK
         self.fmt = pyaudio.paInt16
-
         self.p = pyaudio.PyAudio()
 
-        # Query mic’s native rate if not forced
-        if MIC_SAMPLE_RATE == 0:
-            info = self.p.get_device_info_by_index(self.device_index)
-            self.rate = int(info["defaultSampleRate"])
+        # Determine input rate
+        if MIC_SAMPLE_RATE and MIC_SAMPLE_RATE != 0:
+            self.input_rate = MIC_SAMPLE_RATE
         else:
-            self.rate = MIC_SAMPLE_RATE
+            info = self.p.get_device_info_by_index(self.device_index)
+            self.input_rate = int(info["defaultSampleRate"])
 
-        self.stream_in = None
-        self._rec = False
+        log.info("Mic idx=%d, input rate=%d Hz", self.device_index, self.input_rate)
 
-        for i in range(self.p.get_device_count()):
-            info = self.p.get_device_info_by_index(i)
-            if info["maxInputChannels"]:
-                log.debug("Input‑ID %d : %s", i, info["name"])
+        self.stream = None
+        self.recording = False
 
-    # ---------- mic ---------- #
-    def start(self):
-        if self.stream_in:
-            self.stop()
-        self.stream_in = self.p.open(
+    def start_input(self):
+        if self.stream:
+            self.stop_input()
+        self.stream = self.p.open(
             format=self.fmt,
             channels=self.channels,
-            rate=self.rate,
+            rate=self.input_rate,
             input=True,
             frames_per_buffer=self.chunk,
             input_device_index=self.device_index,
         )
-        self._rec = True
-        log.info("🎙️  Mic ON (idx=%d, %d Hz)", self.device_index, self.rate)
+        self.recording = True
+        log.info("🎙️ Mic ON")
 
-    def read(self) -> bytes | None:
-        if not self._rec or not self.stream_in:
+    def read_chunk(self) -> bytes | None:
+        if not self.recording or not self.stream:
             return None
         try:
-            data = self.stream_in.read(self.chunk, exception_on_overflow=False)
-            if MIC_NORMALISE:
-                audio = np.frombuffer(data, np.int16)
-                peak = np.max(np.abs(audio)) or 1
-                gain = int(0.9 * 32767 / peak)
-                if gain > 1:
-                    audio = np.clip(audio * gain, -32768, 32767).astype(np.int16)
-                    data = audio.tobytes()
-            return data
-        except Exception as exc:  # noqa: BLE001
-            log.error("Mic read error: %s", exc)
+            raw = self.stream.read(self.chunk, exception_on_overflow=False)
+        except Exception as e:
+            log.error("Mic read error: %s", e)
             return None
 
-    def stop(self):
-        if self.stream_in:
-            self.stream_in.stop_stream()
-            self.stream_in.close()
-            self.stream_in = None
-        self._rec = False
-        log.info("🎙️  Mic OFF")
+        # Convert to int16 array
+        audio = np.frombuffer(raw, dtype=np.int16)
 
-    # ---------- speaker ---------- #
-    def play(self, pcm16: bytes):
-        def _play():
+        # Optional normalization
+        if MIC_NORMALISE:
+            peak = np.max(np.abs(audio)) or 1
+            gain = int(0.9 * 32767 / peak)
+            if gain > 1:
+                audio = np.clip(audio * gain, -32768, 32767).astype(np.int16)
+
+        # Downsample to API_SAMPLE_RATE if needed
+        if self.input_rate != API_SAMPLE_RATE:
+            factor = self.input_rate // API_SAMPLE_RATE
+            if factor > 1:
+                audio = audio[::factor]
+
+        return audio.tobytes()
+
+    def stop_input(self):
+        if self.stream:
+            self.stream.stop_stream()
+            self.stream.close()
+            self.stream = None
+        self.recording = False
+        log.info("🎙️ Mic OFF")
+
+    def play(self, data: bytes):
+        """Play API response audio at 24 kHz."""
+        def _playback():
             try:
                 out = self.p.open(
-                    format=self.fmt, channels=1, rate=self.rate, output=True
+                    format=self.fmt,
+                    channels=1,
+                    rate=API_SAMPLE_RATE,
+                    output=True,
                 )
-                out.write(pcm16)
+                out.write(data)
                 out.stop_stream()
                 out.close()
-            except Exception as exc:  # noqa: BLE001
-                log.error("Speaker error: %s", exc)
+            except Exception as e:
+                log.error("Playback error: %s", e)
 
-        threading.Thread(target=_play, daemon=True).start()
+        threading.Thread(target=_playback, daemon=True).start()
 
-    # ---------- cleanup ---------- #
     def close(self):
-        self.stop()
+        self.stop_input()
         self.p.terminate()
 
-
-# ------------------------------------------------------------------#
-#  Realtime client                                                  #
-# ------------------------------------------------------------------#
+# ----------------------------------------------------------------------
+# RealtimeClient
+# ----------------------------------------------------------------------
 class RealtimeClient:
-    """Streams audio/text to OpenAI Realtime API."""
-
-    _URL = "wss://api.openai.com/v1/realtime"
-    _MODEL = "gpt-4o-mini-realtime-preview"
+    URL = "wss://api.openai.com/v1/realtime"
+    MODEL = "gpt-4o-mini-realtime-preview"
 
     def __init__(
         self,
         instructions: str,
         voice: str = "ash",
         mic_index: int = MIC_DEVICE_INDEX,
-        on_text: Optional[Callable[[str], None]] = None,
+        on_text: Callable[[str], None] | None = None,
     ):
         self.api_key = os.getenv("OPENAI_API_KEY")
         if not self.api_key:
-            raise RuntimeError("OPENAI_API_KEY missing")
+            raise RuntimeError("OPENAI_API_KEY not set")
 
-        self.voice = voice
         self.instructions = instructions
+        self.voice = voice
         self.on_text = on_text
 
         self.audio = AudioHandler(mic_index)
@@ -237,180 +373,165 @@ class RealtimeClient:
         self._text_buf = ""
         self._rec_flag = threading.Event()
 
-        # Async event‑loop in background
+        # Start asyncio loop in background
         self.loop = asyncio.new_event_loop()
         threading.Thread(target=self.loop.run_forever, daemon=True).start()
 
-        # Connect WebSocket
+        # Connect to WebSocket
         self.ws = asyncio.run_coroutine_threadsafe(
             self._connect(), self.loop
         ).result()
-        asyncio.run_coroutine_threadsafe(self._recv(), self.loop)
+        asyncio.run_coroutine_threadsafe(self._recv_loop(), self.loop)
 
-        # GPIO
-        self._setup_gpio()
+        # Setup GPIO polling if available
+        if HAS_GPIO:
+            self._setup_gpio()
+        else:
+            log.info("GPIO not available; hardware button disabled")
 
-    # ---------------- WebSocket ------------------------------------#
+    # ---------------- WebSocket -----------------------
     async def _connect(self):
         ssl_ctx = ssl.create_default_context()
         ssl_ctx.check_hostname = False
         ssl_ctx.verify_mode = ssl.CERT_NONE
 
-        self.ws = await websockets.connect(
-            f"{self._URL}?model={self._MODEL}",
+        ws = await websockets.connect(
+            f"{self.URL}?model={self.MODEL}",
             extra_headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "OpenAI-Beta": "realtime=v1",
             },
             ssl=ssl_ctx,
         )
-        await self._send(
-            {
-                "type": "session.update",
-                "session": {
-                    "modalities": ["audio", "text"],
-                    "instructions": self.instructions,
-                    "voice": self.voice,
-                    "input_audio_format": "pcm16",
-                    "output_audio_format": "pcm16",
-                    "turn_detection": None,
-                    "input_audio_transcription": {"model": "whisper-1"},
-                    "temperature": 0.6,
-                },
+        await ws.send(json.dumps({
+            "type": "session.update",
+            "session": {
+                "modalities": ["audio", "text"],
+                "instructions": self.instructions,
+                "voice": self.voice,
+                "input_audio_format": "pcm16",
+                "output_audio_format": "pcm16",
+                "turn_detection": None,
+                "input_audio_transcription": {"model": "whisper-1"},
+                "temperature": 0.6,
             }
-        )
-        await self._send({"type": "response.create"})
-        log.info("Realtime session ready")
-        return self.ws
+        }))
+        await ws.send(json.dumps({"type": "response.create"}))
+        log.info("WebSocket session ready")
+        return ws
 
-    async def _send(self, ev: dict):
-        await self.ws.send(json.dumps(ev))
-
-    async def _recv(self):
+    async def _recv_loop(self):
         try:
-            async for msg in self.ws:
-                await self._handle(json.loads(msg))
-        except Exception as exc:  # noqa: BLE001
-            log.error("WS receive loop exited: %s", exc)
+            async for message in self.ws:
+                await self._handle(json.loads(message))
+        except Exception as e:
+            log.error("WebSocket receive error: %s", e)
 
     async def _handle(self, ev: dict):
-        typ = ev.get("type")
-        if typ == "error":
+        t = ev.get("type")
+        if t == "error":
             log.error("API error: %s", ev["error"]["message"])
-        elif typ == "response.text.delta":
+        elif t == "response.text.delta":
             self._text_buf += ev["delta"]
-        elif typ == "response.text.done":
+        elif t == "response.text.done":
             if self.on_text:
                 self.on_text(self._text_buf)
             self._text_buf = ""
-        elif typ == "response.audio.delta":
+        elif t == "response.audio.delta":
             self._audio_buf += base64.b64decode(ev["delta"])
-        elif typ == "response.audio.done":
+        elif t == "response.audio.done":
             if self._audio_buf:
                 self.audio.play(self._audio_buf)
             self._audio_buf = b""
-        else:
-            log.debug("Event %s", typ)
 
-    # ---------------- mic streaming --------------------------------#
-    async def _mic_loop(self):
-        self.audio.start()
-        try:
-            while self._rec_flag.is_set():
-                chunk = self.audio.read()
-                if chunk:
-                    await self._send(
-                        {
-                            "type": "input_audio_buffer.append",
-                            "audio": base64.b64encode(chunk).decode(),
-                        }
-                    )
-                await asyncio.sleep(0.0)
-        finally:
-            self.audio.stop()
-            await self._send({"type": "input_audio_buffer.commit"})
-            await self._send({"type": "response.create"})
-            log.info("Audio committed")
+    async def _mic_stream(self):
+        self.audio.start_input()
+        while self._rec_flag.is_set():
+            chunk = self.audio.read_chunk()
+            if chunk:
+                await self.ws.send(json.dumps({
+                    "type": "input_audio_buffer.append",
+                    "audio": base64.b64encode(chunk).decode(),
+                }))
+            await asyncio.sleep(0.0)
+        self.audio.stop_input()
+        await self.ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+        await self.ws.send(json.dumps({"type": "response.create"}))
+        log.info("Audio committed")
 
-    # ---------------- text -----------------------------------------#
     async def _send_text_async(self, text: str):
-        await self._send(
-            {
-                "type": "conversation.item.create",
-                "item": {
-                    "type": "message",
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": text}],
-                },
+        await self.ws.send(json.dumps({
+            "type": "conversation.item.create",
+            "item": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": text}],
             }
-        )
-        await self._send({"type": "response.create"})
+        }))
+        await self.ws.send(json.dumps({"type": "response.create"}))
 
-    # ---------------- GPIO setup -----------------------------------#
-    def _setup_gpio(self):
-        try:
-            import RPi.GPIO as GPIO  # type: ignore
-        except (ImportError, RuntimeError):
-            log.warning("GPIO not available – running headless dev mode?")
-            self.gpio_ok = False
-            return
-
-        self.gpio_ok = True
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setup(GPIO_LED_PIN, GPIO.OUT, initial=GPIO.LOW)
-
-        pull = GPIO.PUD_DOWN if BUTTON_ACTIVE_HIGH else GPIO.PUD_UP
-        GPIO.setup(GPIO_BUTTON_PIN, GPIO.IN, pull_up_down=pull)
-
-        edge = GPIO.RISING if BUTTON_ACTIVE_HIGH else GPIO.FALLING
-        GPIO.add_event_detect(
-            GPIO_BUTTON_PIN, edge, callback=self._gpio_toggle, bouncetime=150
-        )
-        log.info(
-            "GPIO ready (button GPIO%d active %s, LED GPIO%d)",
-            GPIO_BUTTON_PIN,
-            "HIGH" if BUTTON_ACTIVE_HIGH else "LOW",
-            GPIO_LED_PIN,
-        )
-
-    def _gpio_toggle(self, channel=None):
-        import RPi.GPIO as GPIO  # type: ignore
-        if self._rec_flag.is_set():
-            self.stop_talking()
-            if self.gpio_ok:
-                GPIO.output(GPIO_LED_PIN, GPIO.LOW)
-        else:
-            self.start_talking()
-            if self.gpio_ok:
-                GPIO.output(GPIO_LED_PIN, GPIO.HIGH)
-
-    # ---------------- public API -----------------------------------#
+    # ---------------- public API -----------------------
     def start_talking(self):
-        if self._rec_flag.is_set():
-            return
-        self._rec_flag.set()
-        asyncio.run_coroutine_threadsafe(self._mic_loop(), self.loop)
-        log.debug("Recording started")
+        if not self._rec_flag.is_set():
+            self._rec_flag.set()
+            asyncio.run_coroutine_threadsafe(self._mic_stream(), self.loop)
+            log.info("Started talking")
 
     def stop_talking(self):
-        self._rec_flag.clear()
-        log.debug("Recording stopped")
+        if self._rec_flag.is_set():
+            self._rec_flag.clear()
+            log.info("Stopped talking")
 
     def send_text(self, text: str):
-        asyncio.run_coroutine_threadsafe(
-            self._send_text_async(text), self.loop
-        )
+        asyncio.run_coroutine_threadsafe(self._send_text_async(text), self.loop)
 
-    # ---------------- cleanup --------------------------------------#
     def close(self):
-        if self.gpio_ok:
-            import RPi.GPIO as GPIO  # type: ignore
-            GPIO.output(GPIO_LED_PIN, GPIO.LOW)
-            GPIO.cleanup((GPIO_BUTTON_PIN, GPIO_LED_PIN))
         self.audio.close()
         if self.ws and not self.ws.closed:
             asyncio.run_coroutine_threadsafe(self.ws.close(), self.loop)
         self.loop.call_soon_threadsafe(self.loop.stop())
+        if HAS_GPIO:
+            GPIO.cleanup((GPIO_BUTTON_PIN, GPIO_LED_PIN))
+
+    # ---------------- GPIO polling ---------------------
+    def _setup_gpio(self):
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setup(GPIO_LED_PIN, GPIO.OUT, initial=GPIO.LOW)
+        GPIO.setup(GPIO_BUTTON_PIN, GPIO.IN)  # external pull-down
+
+        threading.Thread(target=self._poll_button, daemon=True).start()
+        log.info("GPIO polling thread started (button %d, LED %d)",
+                 GPIO_BUTTON_PIN, GPIO_LED_PIN)
+
+    def _poll_button(self):
+        last = GPIO.input(GPIO_BUTTON_PIN)
+        while True:
+            cur = GPIO.input(GPIO_BUTTON_PIN)
+            if not last and cur:  # LOW->HIGH
+                if self._rec_flag.is_set():
+                    self.stop_talking()
+                    GPIO.output(GPIO_LED_PIN, GPIO.LOW)
+                else:
+                    self.start_talking()
+                    GPIO.output(GPIO_LED_PIN, GPIO.HIGH)
+            last = cur
+            threading.Event().wait(0.05)
+
+# ----------------------------------------------------------------------
+# Standalone test
+# ----------------------------------------------------------------------
+if __name__ == "__main__":
+    def print_text(msg): print("TEX:", msg)
+
+    client = RealtimeClient(
+        INSTRUCTIONS, voice="ash",
+        mic_index=MIC_DEVICE_INDEX,
+        on_text=print_text
+    )
+    try:
+        asyncio.get_event_loop().run_forever()
+    except KeyboardInterrupt:
+        client.close()
 
 
 ================================================
@@ -557,6 +678,21 @@ if __name__ == "__main__":
 
 
 ================================================
+File: /setup.py
+================================================
+from openai import OpenAI
+
+client = OpenAI()
+
+# Create a new, empty vector store
+vector_store = client.vector_stores.create(
+    name="UniSubjectNotes"
+)
+VECTOR_STORE_ID = vector_store.id
+print("Your vector_store_id:", VECTOR_STORE_ID)
+
+
+================================================
 File: /gpio_controller.py
 ================================================
 """
@@ -643,22 +779,14 @@ File: /app.py
 ================================================
 #!/usr/bin/env python3
 """
-Flask / Flask‑SocketIO server for STR.
+Flask / Flask‑SocketIO server for STR, now with PDF concepts & questions.
 """
 
 from __future__ import annotations
-
 import os
 import logging
-
 from dotenv import load_dotenv
-from flask import (
-    Flask,
-    jsonify,
-    render_template,
-    request,
-    send_from_directory,
-)
+from flask import Flask, jsonify, render_template, request, send_from_directory
 from flask_socketio import SocketIO, emit
 from elevenlabs import ElevenLabs
 from openai import OpenAI
@@ -666,19 +794,18 @@ from openai import OpenAI
 from agents import process_query
 from tts import generate_tts
 from realtime import RealtimeClient, INSTRUCTIONS
-from file_manager import PDFManager
-from config import MIC_DEVICE_INDEX   # <<<<<< NEW
+from files import PDFManager
+from config import MIC_DEVICE_INDEX
+from config import MIC_DEVICE_INDEX, VECTOR_STORE_ID
 
-# ------------------------------------------------------------------#
-#  Config                                                           #
-# ------------------------------------------------------------------#
+
+# ------------------------------------------------------------------
 logging.basicConfig(level=logging.INFO)
 load_dotenv()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 AUDIO_DIR = os.path.join(BASE_DIR, "audio_files")
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
-
 os.makedirs(AUDIO_DIR, exist_ok=True)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -690,41 +817,27 @@ if not all([ELEVENLABS_API_KEY, VOICE_ID, MODEL_ID]):
 
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*")
-
 eleven_client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
 openai_client = OpenAI()
+pdf_manager = PDFManager(UPLOAD_DIR, VECTOR_STORE_ID)
 
-pdf_manager = PDFManager(UPLOAD_DIR)
-
-
-# ------------------------------------------------------------------#
-#  Realtime client                                                  #
-# ------------------------------------------------------------------#
 def _broadcast(msg: str):
     socketio.emit("broadcast_text", {"message": msg}, namespace="/realtime")
-
 
 realtime_client = RealtimeClient(
     instructions=INSTRUCTIONS,
     voice="ash",
-    mic_index=MIC_DEVICE_INDEX,      # <<<<<< NEW
+    mic_index=MIC_DEVICE_INDEX,
     on_text=_broadcast,
 )
 
-
-
-# ------------------------------------------------------------------#
-#  Static / HTML                                                    #
-# ------------------------------------------------------------------#
 @app.route("/")
 def index():
     return render_template("index.html")
 
-
 @app.route("/audio_files/<path:filename>")
 def serve_audio(filename):
     return send_from_directory(AUDIO_DIR, filename)
-
 
 # ------------------------------------------------------------------#
 #  TTS                                                              #
@@ -755,18 +868,17 @@ def agent_endpoint():
     )
 
 
-# ------------------------------------------------------------------#
-#  PDF – upload & ask                                               #
-# ------------------------------------------------------------------#
+# ------------------------------------------------------------------
+# PDF – upload & ask & concepts & questions
+# ------------------------------------------------------------------
 @app.route("/api/pdf/upload", methods=["POST"])
 def pdf_upload():
     try:
         info = pdf_manager.upload(request.files.get("file"))
         return jsonify(info)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logging.exception("PDF upload failed")
         return jsonify({"error": str(exc)}), 400
-
 
 @app.route("/api/pdf/ask", methods=["POST"])
 def pdf_ask():
@@ -777,14 +889,34 @@ def pdf_ask():
         return jsonify({"error": "Invalid request"}), 400
     try:
         answer = pdf_manager.ask(filename, question)
-    except Exception as exc:  # noqa: BLE001
+        res = generate_tts(answer, eleven_client, VOICE_ID, MODEL_ID, AUDIO_DIR)
+        return jsonify({"answer": answer, "audio_url": f"/audio_files/{res['mp3_filename']}"})
+    except Exception as exc:
         logging.exception("PDF ask error")
         return jsonify({"error": str(exc)}), 400
-    res = generate_tts(answer, eleven_client, VOICE_ID, MODEL_ID, AUDIO_DIR)
-    return jsonify(
-        {"answer": answer, "audio_url": f"/audio_files/{res['mp3_filename']}"}
-    )
+@app.route("/api/pdf/concepts", methods=["POST"])
+def pdf_concepts():
+    data = request.get_json() or {}
+    fn   = data.get("filename")
+    if not fn: return jsonify({"error":"No filename"}),400
+    try:
+        concepts = pdf_manager.concepts(fn)
+        return jsonify({"concepts":concepts})
+    except Exception as e:
+        logging.exception("PDF concepts error")
+        return jsonify({"error":str(e)}),400
 
+@app.route("/api/pdf/questions", methods=["POST"])
+def pdf_questions():
+    data = request.get_json() or {}
+    fn   = data.get("filename")
+    if not fn: return jsonify({"error":"No filename"}),400
+    try:
+        questions = pdf_manager.questions(fn)
+        return jsonify({"questions":questions})
+    except Exception as e:
+        logging.exception("PDF questions error")
+        return jsonify({"error":str(e)}),400
 
 # ------------------------------------------------------------------#
 #  SocketIO – realtime                                              #
@@ -844,11 +976,9 @@ File: /templates/index.html
         <button data-tab="pdf" class="tab">PDF</button>
       </nav>
 
-      <!-- Panels -->
       <!-- ------------ TTS ------------- -->
       <section id="panel-tts" class="panel flex flex-col gap-4">
         <div id="ttsFeed" class="feed"></div>
-
         <div class="flex flex-col gap-2">
           <textarea
             id="ttsInput"
@@ -865,7 +995,6 @@ File: /templates/index.html
       <!-- ------------ Agent ----------- -->
       <section id="panel-agent" class="panel hidden flex flex-col gap-4">
         <div id="agentFeed" class="feed"></div>
-
         <div class="flex flex-col gap-2">
           <textarea
             id="agentInput"
@@ -882,7 +1011,6 @@ File: /templates/index.html
       <!-- -------- Realtime ------------ -->
       <section id="panel-realtime" class="panel hidden flex flex-col gap-4">
         <div id="realtimeFeed" class="feed"></div>
-
         <div class="flex flex-col gap-4">
           <div class="flex gap-2">
             <button id="startTalking" class="btn-primary">🎙️ Start</button>
@@ -891,7 +1019,6 @@ File: /templates/index.html
             </button>
             <button id="rtClear" class="btn-secondary">Limpiar</button>
           </div>
-
           <div class="flex gap-2">
             <input
               id="realtimeText"
@@ -907,24 +1034,30 @@ File: /templates/index.html
       <!-- ------------- PDF ------------ -->
       <section id="panel-pdf" class="panel hidden flex flex-col gap-4">
         <div id="pdfFeed" class="feed"></div>
-
         <div class="flex flex-col gap-2">
-          <input type="file" id="pdfFile" accept="application/pdf" />
-          <div class="flex gap-2">
-            <button id="pdfUpload" class="btn-primary">Subir</button>
-            <button id="pdfClear" class="btn-secondary">Limpiar</button>
-          </div>
-          <p id="pdfUploadStatus" class="text-sm text-gray-600"></p>
-
+          <!-- File chooser -->
           <input
-            id="pdfQuestion"
+            type="file"
+            id="pdfFile"
+            accept="application/pdf"
             class="input-box"
-            placeholder="Pregunta sobre tu PDF…"
-            disabled
           />
-          <button id="pdfAsk" class="btn-primary w-max" disabled>
-            Preguntar
-          </button>
+          <p id="pdfUploadStatus" class="text-sm text-gray-600">
+            Elige un PDF para cargar…
+          </p>
+
+          <!-- Q&A controls (hidden until PDF ready) -->
+          <div id="pdfQA" class="hidden flex flex-col gap-2">
+            <div class="flex gap-2">
+              <input
+                id="pdfQuestion"
+                class="input-box flex-grow"
+                placeholder="Pregunta sobre tu PDF…"
+              />
+              <button id="pdfAsk" class="btn-primary">Preguntar</button>
+              <button id="pdfClear" class="btn-secondary">Limpiar</button>
+            </div>
+          </div>
         </div>
       </section>
     </div>
@@ -995,7 +1128,7 @@ File: /templates/index.html
         el(sel).innerHTML = "";
       };
 
-      const appendBubble = (feedSel, text, who, audioUrl) => {
+      function appendBubble(feedSel, text, who, audioUrl) {
         const div = document.createElement("div");
         div.className = `bubble ${who}`;
         div.innerHTML =
@@ -1003,9 +1136,9 @@ File: /templates/index.html
           (audioUrl ? `<audio controls src="${audioUrl}"></audio>` : "");
         el(feedSel).appendChild(div);
         div.scrollIntoView({ behavior: "smooth" });
-      };
+      }
 
-      /* ---------- tabs ---------- */
+      /* ---------- Tabs ---------- */
       document.querySelectorAll("#tabs .tab").forEach((btn) => {
         btn.onclick = () => {
           document
@@ -1053,7 +1186,7 @@ File: /templates/index.html
       };
       el("#agentClear").onclick = () => feedClear("#agentFeed");
 
-      /* ---------- Realtime mic+text ---------- */
+      /* ---------- Realtime ---------- */
       el("#startTalking").onclick = () => {
         socket.emit("start_talking");
         el("#startTalking").disabled = true;
@@ -1064,14 +1197,14 @@ File: /templates/index.html
         el("#stopTalking").disabled = true;
         el("#startTalking").disabled = false;
       };
-      el("#realtimeTextSend").onclick = () => {
-        const msg = el("#realtimeText").value.trim();
-        if (!msg) return;
-        appendBubble("#realtimeFeed", msg, "user");
-        el("#realtimeText").value = "";
-        socket.emit("send_text", { text: msg });
-      };
       el("#rtClear").onclick = () => feedClear("#realtimeFeed");
+      el("#realtimeTextSend").onclick = () => {
+        const m = el("#realtimeText").value.trim();
+        if (!m) return;
+        appendBubble("#realtimeFeed", m, "user");
+        el("#realtimeText").value = "";
+        socket.emit("send_text", { text: m });
+      };
       socket.on(
         "status",
         (d) => (el("#realtimeStatus").textContent = d.message)
@@ -1080,29 +1213,27 @@ File: /templates/index.html
         appendBubble("#realtimeFeed", d.message, "bot")
       );
 
-      /* ---------- PDF ---------- */
+      /* ---------- PDF: auto‑upload & Q&A ---------- */
       let currentPDF = null;
-      el("#pdfUpload").onclick = async () => {
+      el("#pdfFile").onchange = async () => {
         const f = el("#pdfFile").files[0];
-        if (!f) {
-          alert("Elige un PDF");
-          return;
-        }
+        if (!f) return;
+        el("#pdfUploadStatus").textContent =
+          "Subiendo e indexando… por favor espera";
         const fd = new FormData();
         fd.append("file", f);
-        el("#pdfUploadStatus").textContent = "Subiendo…";
         const r = await fetch("/api/pdf/upload", { method: "POST", body: fd });
         const j = await r.json();
         if (r.ok) {
           currentPDF = j.filename;
-          el("#pdfUploadStatus").textContent = `PDF cargado: ${currentPDF}`;
-          el("#pdfQuestion").disabled = false;
-          el("#pdfAsk").disabled = false;
+          el("#pdfUploadStatus").textContent = `PDF listo: ${currentPDF}`;
+          el("#pdfQA").classList.remove("hidden");
         } else {
           alert(j.error);
-          el("#pdfUploadStatus").textContent = "";
+          el("#pdfUploadStatus").textContent = "Error al cargar";
         }
       };
+
       el("#pdfAsk").onclick = async () => {
         const q = el("#pdfQuestion").value.trim();
         if (!q || !currentPDF) return;
@@ -1117,85 +1248,10 @@ File: /templates/index.html
         if (r.ok) appendBubble("#pdfFeed", j.answer, "bot", j.audio_url);
         else alert(j.error);
       };
+
       el("#pdfClear").onclick = () => feedClear("#pdfFeed");
     </script>
   </body>
 </html>
-
-
-================================================
-File: /file_manager.py
-================================================
-#!/usr/bin/env python3
-"""
-PDF upload + question‑answering logic, isolated from the Flask app.
-
-• Uploads a PDF to the OpenAI Files endpoint and keeps the mapping
-  filename → file_id in memory (could be persisted if needed).
-• Answers questions with the File‑search tool (beta) following:
-  https://platform.openai.com/docs/guides/pdf-files
-"""
-
-from __future__ import annotations
-
-import os
-import logging
-from typing import Dict
-
-from openai import OpenAI
-
-log = logging.getLogger(__name__)
-
-
-class PDFManager:
-    """Simple in‑memory PDF store."""
-
-    def __init__(self, upload_dir: str):
-        self.upload_dir = upload_dir
-        os.makedirs(self.upload_dir, exist_ok=True)
-        self.client = OpenAI()
-        self._store: Dict[str, str] = {}  # filename → file_id
-
-    # ------------------------------------------------------------------#
-    #  Upload                                                           #
-    # ------------------------------------------------------------------#
-    def upload(self, werkzeug_file) -> dict:
-        """
-        Save PDF locally and upload to OpenAI. Returns dict with {file_id, filename}.
-        """
-        if not werkzeug_file or not werkzeug_file.filename.lower().endswith(".pdf"):
-            raise ValueError("A PDF file is required.")
-
-        save_path = os.path.join(self.upload_dir, werkzeug_file.filename)
-        werkzeug_file.save(save_path)
-
-        with open(save_path, "rb") as f:
-            openai_file = self.client.files.create(file=f, purpose="assistants")
-
-        self._store[werkzeug_file.filename] = openai_file.id
-        log.info("PDF uploaded: %s → %s", werkzeug_file.filename, openai_file.id)
-        return {"file_id": openai_file.id, "filename": werkzeug_file.filename}
-
-    # ------------------------------------------------------------------#
-    #  Ask                                                              #
-    # ------------------------------------------------------------------#
-    def ask(self, filename: str, question: str) -> str:
-        """
-        Query the uploaded PDF with file_search tool and return the text answer.
-        """
-        if filename not in self._store:
-            raise ValueError("File not found. Upload first.")
-
-        file_id = self._store[filename]
-
-        completion = self.client.chat.completions.create(
-            model="gpt-4.1-mini",
-            messages=[{"role": "user", "content": question}],
-            tools=[{"type": "file_search"}],
-            file_ids=[file_id],
-        )
-        answer = completion.choices[0].message.content
-        log.debug("PDF answer: %s", answer)
-        return answer
 
 

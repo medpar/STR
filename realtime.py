@@ -6,15 +6,8 @@ Realtime speech-to-speech for STR.
 • Streams audio or typed text to OpenAI Realtime API and plays back at 24 kHz.
 • Toggles recording via web buttons or physical push‑button (GPIO17),
   lights LED (GPIO27) while recording.
-• Uses external 10 kΩ pull‑down resistor on the button.
+• Uses external 10 kΩ pull‑down resistor on the button when available.
 
-Wiring (BCM):
-  Button pin 17 ──► 3.3 V
-         │
-   10 kΩ resistor
-         │
-        GND
-  LED anode──►330 Ω──►GPIO27; LED cathode►GND
 """
 
 from __future__ import annotations
@@ -29,7 +22,13 @@ import logging
 import pyaudio
 import numpy as np
 import websockets  # ==13.*
-import RPi.GPIO as GPIO
+
+# Try to import RPi.GPIO; if unavailable, disable GPIO features
+try:
+    import RPi.GPIO as GPIO
+    HAS_GPIO = True
+except ImportError:
+    HAS_GPIO = False
 
 from config import (
     MIC_DEVICE_INDEX,
@@ -64,7 +63,7 @@ INSTRUCTIONS = (
     "You are a professional radio broadcaster. Provide a natural, "
     "broadcast-style answer. Answer in Spanish from Spain. Use European "
     "format for all dates and units. Do not say anything in your first "
-    "message except 'Voice real time mode started.'. Answer briefly."
+    "message except 'Started'. Answer briefly."
 )
 
 # ----------------------------------------------------------------------
@@ -200,8 +199,11 @@ class RealtimeClient:
         ).result()
         asyncio.run_coroutine_threadsafe(self._recv_loop(), self.loop)
 
-        # Setup GPIO polling
-        self._setup_gpio()
+        # Setup GPIO polling if available
+        if HAS_GPIO:
+            self._setup_gpio()
+        else:
+            log.info("GPIO not available; hardware button disabled")
 
     # ---------------- WebSocket -----------------------
     async def _connect(self):
@@ -257,7 +259,6 @@ class RealtimeClient:
             if self._audio_buf:
                 self.audio.play(self._audio_buf)
             self._audio_buf = b""
-        # other events ignored
 
     async def _mic_stream(self):
         self.audio.start_input()
@@ -305,7 +306,8 @@ class RealtimeClient:
         if self.ws and not self.ws.closed:
             asyncio.run_coroutine_threadsafe(self.ws.close(), self.loop)
         self.loop.call_soon_threadsafe(self.loop.stop())
-        GPIO.cleanup((GPIO_BUTTON_PIN, GPIO_LED_PIN))
+        if HAS_GPIO:
+            GPIO.cleanup((GPIO_BUTTON_PIN, GPIO_LED_PIN))
 
     # ---------------- GPIO polling ---------------------
     def _setup_gpio(self):
@@ -332,14 +334,16 @@ class RealtimeClient:
             threading.Event().wait(0.05)
 
 # ----------------------------------------------------------------------
-# If run standalone for testing
+# Standalone test
 # ----------------------------------------------------------------------
 if __name__ == "__main__":
     def print_text(msg): print("TEX:", msg)
 
-    client = RealtimeClient(INSTRUCTIONS, voice="ash",
-                            mic_index=MIC_DEVICE_INDEX,
-                            on_text=print_text)
+    client = RealtimeClient(
+        INSTRUCTIONS, voice="ash",
+        mic_index=MIC_DEVICE_INDEX,
+        on_text=print_text
+    )
     try:
         asyncio.get_event_loop().run_forever()
     except KeyboardInterrupt:

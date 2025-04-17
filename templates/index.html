@@ -19,11 +19,9 @@
         <button data-tab="pdf" class="tab">PDF</button>
       </nav>
 
-      <!-- Panels -->
       <!-- ------------ TTS ------------- -->
       <section id="panel-tts" class="panel flex flex-col gap-4">
         <div id="ttsFeed" class="feed"></div>
-
         <div class="flex flex-col gap-2">
           <textarea
             id="ttsInput"
@@ -40,7 +38,6 @@
       <!-- ------------ Agent ----------- -->
       <section id="panel-agent" class="panel hidden flex flex-col gap-4">
         <div id="agentFeed" class="feed"></div>
-
         <div class="flex flex-col gap-2">
           <textarea
             id="agentInput"
@@ -57,7 +54,6 @@
       <!-- -------- Realtime ------------ -->
       <section id="panel-realtime" class="panel hidden flex flex-col gap-4">
         <div id="realtimeFeed" class="feed"></div>
-
         <div class="flex flex-col gap-4">
           <div class="flex gap-2">
             <button id="startTalking" class="btn-primary">🎙️ Start</button>
@@ -66,7 +62,6 @@
             </button>
             <button id="rtClear" class="btn-secondary">Limpiar</button>
           </div>
-
           <div class="flex gap-2">
             <input
               id="realtimeText"
@@ -82,24 +77,30 @@
       <!-- ------------- PDF ------------ -->
       <section id="panel-pdf" class="panel hidden flex flex-col gap-4">
         <div id="pdfFeed" class="feed"></div>
-
         <div class="flex flex-col gap-2">
-          <input type="file" id="pdfFile" accept="application/pdf" />
-          <div class="flex gap-2">
-            <button id="pdfUpload" class="btn-primary">Subir</button>
-            <button id="pdfClear" class="btn-secondary">Limpiar</button>
-          </div>
-          <p id="pdfUploadStatus" class="text-sm text-gray-600"></p>
-
+          <!-- File chooser -->
           <input
-            id="pdfQuestion"
+            type="file"
+            id="pdfFile"
+            accept="application/pdf"
             class="input-box"
-            placeholder="Pregunta sobre tu PDF…"
-            disabled
           />
-          <button id="pdfAsk" class="btn-primary w-max" disabled>
-            Preguntar
-          </button>
+          <p id="pdfUploadStatus" class="text-sm text-gray-600">
+            Elige un PDF para cargar…
+          </p>
+
+          <!-- Q&A controls (hidden until PDF ready) -->
+          <div id="pdfQA" class="hidden flex flex-col gap-2">
+            <div class="flex gap-2">
+              <input
+                id="pdfQuestion"
+                class="input-box flex-grow"
+                placeholder="Pregunta sobre tu PDF…"
+              />
+              <button id="pdfAsk" class="btn-primary">Preguntar</button>
+              <button id="pdfClear" class="btn-secondary">Limpiar</button>
+            </div>
+          </div>
         </div>
       </section>
     </div>
@@ -170,7 +171,7 @@
         el(sel).innerHTML = "";
       };
 
-      const appendBubble = (feedSel, text, who, audioUrl) => {
+      function appendBubble(feedSel, text, who, audioUrl) {
         const div = document.createElement("div");
         div.className = `bubble ${who}`;
         div.innerHTML =
@@ -178,9 +179,9 @@
           (audioUrl ? `<audio controls src="${audioUrl}"></audio>` : "");
         el(feedSel).appendChild(div);
         div.scrollIntoView({ behavior: "smooth" });
-      };
+      }
 
-      /* ---------- tabs ---------- */
+      /* ---------- Tabs ---------- */
       document.querySelectorAll("#tabs .tab").forEach((btn) => {
         btn.onclick = () => {
           document
@@ -228,7 +229,7 @@
       };
       el("#agentClear").onclick = () => feedClear("#agentFeed");
 
-      /* ---------- Realtime mic+text ---------- */
+      /* ---------- Realtime ---------- */
       el("#startTalking").onclick = () => {
         socket.emit("start_talking");
         el("#startTalking").disabled = true;
@@ -239,14 +240,14 @@
         el("#stopTalking").disabled = true;
         el("#startTalking").disabled = false;
       };
-      el("#realtimeTextSend").onclick = () => {
-        const msg = el("#realtimeText").value.trim();
-        if (!msg) return;
-        appendBubble("#realtimeFeed", msg, "user");
-        el("#realtimeText").value = "";
-        socket.emit("send_text", { text: msg });
-      };
       el("#rtClear").onclick = () => feedClear("#realtimeFeed");
+      el("#realtimeTextSend").onclick = () => {
+        const m = el("#realtimeText").value.trim();
+        if (!m) return;
+        appendBubble("#realtimeFeed", m, "user");
+        el("#realtimeText").value = "";
+        socket.emit("send_text", { text: m });
+      };
       socket.on(
         "status",
         (d) => (el("#realtimeStatus").textContent = d.message)
@@ -255,29 +256,27 @@
         appendBubble("#realtimeFeed", d.message, "bot")
       );
 
-      /* ---------- PDF ---------- */
+      /* ---------- PDF: auto‑upload & Q&A ---------- */
       let currentPDF = null;
-      el("#pdfUpload").onclick = async () => {
+      el("#pdfFile").onchange = async () => {
         const f = el("#pdfFile").files[0];
-        if (!f) {
-          alert("Elige un PDF");
-          return;
-        }
+        if (!f) return;
+        el("#pdfUploadStatus").textContent =
+          "Subiendo e indexando… por favor espera";
         const fd = new FormData();
         fd.append("file", f);
-        el("#pdfUploadStatus").textContent = "Subiendo…";
         const r = await fetch("/api/pdf/upload", { method: "POST", body: fd });
         const j = await r.json();
         if (r.ok) {
           currentPDF = j.filename;
-          el("#pdfUploadStatus").textContent = `PDF cargado: ${currentPDF}`;
-          el("#pdfQuestion").disabled = false;
-          el("#pdfAsk").disabled = false;
+          el("#pdfUploadStatus").textContent = `PDF listo: ${currentPDF}`;
+          el("#pdfQA").classList.remove("hidden");
         } else {
           alert(j.error);
-          el("#pdfUploadStatus").textContent = "";
+          el("#pdfUploadStatus").textContent = "Error al cargar";
         }
       };
+
       el("#pdfAsk").onclick = async () => {
         const q = el("#pdfQuestion").value.trim();
         if (!q || !currentPDF) return;
@@ -292,6 +291,7 @@
         if (r.ok) appendBubble("#pdfFeed", j.answer, "bot", j.audio_url);
         else alert(j.error);
       };
+
       el("#pdfClear").onclick = () => feedClear("#pdfFeed");
     </script>
   </body>
