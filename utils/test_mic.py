@@ -73,7 +73,7 @@ def main():
 
     # --- Parámetros fijos ---
     device_index = 1           # ID del mic USB por defecto
-    rate         = 38000       # forzamos 44.1 kHz para evitar aceleración
+    rate         = 48000       # forzamos 44.1 kHz para evitar aceleración
     channels     = 1           # mono
 
     info = pa.get_device_info_by_index(device_index)
