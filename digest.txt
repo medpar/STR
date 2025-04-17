@@ -9,13 +9,16 @@ Directory structure:
     ├── setup.py
     ├── gpio_controller.py
     ├── app.py
+    ├── bluetooth.py
     └── templates/
         └── index.html
 
 ================================================
 File: /files.py
 ================================================
+# ================================================
 # File: /files.py
+# ================================================
 #!/usr/bin/env python3
 """
 PDF upload + question‑answering logic, isolated from the Flask app.
@@ -23,7 +26,7 @@ PDF upload + question‑answering logic, isolated from the Flask app.
 • Uploads a PDF to the OpenAI Files endpoint and keeps the mapping
   filename → file_id in memory.
 • Adds each file to your vector store (indexing happens asynchronously).
-• Answers questions with the file_search tool.
+• Answers questions with the file_search tool, focusing on the specified file.
 • Provides `concepts()` and `questions()` helpers for the UI.
 """
 
@@ -43,14 +46,18 @@ class PDFManager:
         self.upload_dir = upload_dir
         os.makedirs(self.upload_dir, exist_ok=True)
         self.client = OpenAI()
+        # Simple in-memory store. For persistence, consider a DB or file.
         self._store: Dict[str, str] = {}  # filename → file_id
         self.vector_store_id = vector_store_id
+        # Keep track of the currently "active" filename for context
+        self.current_filename: str | None = None
 
     def upload(self, werkzeug_file) -> dict:
         """
         1. Save PDF locally
         2. Upload to OpenAI Files (purpose="assistants")
         3. Add to vector store
+        4. Set as the current file for context
         Returns {"file_id": ..., "filename": ...}
         (Indexing is kicked off but not awaited.)
         """
@@ -60,112 +67,156 @@ class PDFManager:
         filename = werkzeug_file.filename
         local_path = os.path.join(self.upload_dir, filename)
         werkzeug_file.save(local_path)
+        log.info("Saved PDF locally: %s", local_path)
 
         # 1) Upload to Files API
-        with open(local_path, "rb") as f:
-            openai_file = self.client.files.create(file=f, purpose="assistants")
-        file_id = openai_file.id
-        self._store[filename] = file_id
-        log.info("Uploaded PDF %s → file_id=%s", filename, file_id)
+        # Check if already uploaded (by filename in store) to avoid re-upload cost/time
+        if filename in self._store:
+            file_id = self._store[filename]
+            log.info("PDF %s already uploaded (file_id=%s). Skipping upload.", filename, file_id)
+        else:
+            try:
+                with open(local_path, "rb") as f:
+                    openai_file = self.client.files.create(file=f, purpose="assistants")
+                file_id = openai_file.id
+                self._store[filename] = file_id # Store mapping after successful upload
+                log.info("Uploaded PDF %s → file_id=%s", filename, file_id)
+            except Exception as e:
+                log.error("Failed to upload PDF %s to OpenAI: %s", filename, e)
+                # Clean up local file if upload fails? Optional.
+                # os.remove(local_path)
+                raise ValueError(f"Failed to upload PDF to OpenAI: {e}")
 
         # 2) Add to Vector Store (indexing runs in background)
-        # Check if file already exists in the vector store to avoid duplicates (Optional but good practice)
         try:
-            # Note: This is a basic check; robust check might need listing files and comparing IDs.
-            # For simplicity, we just try to add it. If it fails due to duplication,
-            # the API might handle it gracefully or raise an error we might want to catch.
+            # Check if file is already associated with the vector store
+            # Note: Listing all files can be slow for large stores. This is a basic check.
+            # A more robust check might involve tracking associations separately.
+            # For now, we try adding it, catching potential errors if it exists.
             self.client.vector_stores.files.create(
                 vector_store_id=self.vector_store_id,
                 file_id=file_id
             )
-            log.info("Vector‑store indexing started for file_id=%s", file_id)
+            log.info("Added file_id=%s to vector store %s. Indexing started.", file_id, self.vector_store_id)
         except Exception as e:
-            # Log if adding the file failed, e.g., if it was already added.
-            log.warning("Could not add file %s to vector store (maybe already exists?): %s", file_id, e)
+            # Handle potential error if file is already in the vector store (this might not be an error depending on API behavior)
+            if "already attached" in str(e).lower(): # Example error check, adjust based on actual API errors
+                 log.warning("File %s (file_id=%s) already in vector store %s.", filename, file_id, self.vector_store_id)
+            else:
+                log.error("Failed to add file_id=%s to vector store %s: %s", file_id, self.vector_store_id, e)
+                # Decide if this should raise an error or just be a warning
+                # raise ValueError(f"Failed to add file to vector store: {e}")
 
+        # 3) Set this as the current file
+        self.current_filename = filename
+        log.info("Set current active PDF to: %s", filename)
 
         return {"file_id": file_id, "filename": filename}
+
+    def _get_file_context_prompt(self, filename: str) -> str:
+        """Generates the context part of the prompt."""
+        if not filename:
+             log.warning("No specific filename provided for context.")
+             return ""
+        # Check if the filename exists in our store or locally for validation
+        if filename not in self._store and not os.path.exists(os.path.join(self.upload_dir, filename)):
+            log.error("Filename '%s' requested for context does not exist.", filename)
+            # Raise error or return empty string depending on desired behavior
+            raise ValueError(f"Cannot generate context for non-existent file: {filename}")
+        return f"Referencing the document named '{filename}'. "
+
 
     def ask(self, filename: str, question: str) -> str:
         """
         Ask a free‑form question using Responses API + file_search tool,
-        explicitly mentioning the filename.
+        strongly biasing towards the specified filename via prompt context.
         """
+        if not filename:
+            raise ValueError("Filename must be provided to 'ask'.")
         if filename not in self._store:
-            # Check if the file exists locally even if not in memory store (e.g. after restart)
-            local_path = os.path.join(self.upload_dir, filename)
-            if not os.path.exists(local_path):
+             # If not in memory, check if it exists locally (e.g. after restart)
+             local_path = os.path.join(self.upload_dir, filename)
+             if os.path.exists(local_path):
+                 log.warning("File '%s' exists locally but not in session store. Re-upload might be needed for full functionality.", filename)
+                 # Attempting to proceed, but vector store might not have it indexed correctly without re-upload/add.
+             else:
                  raise ValueError(f"File '{filename}' not found. Upload first.")
-            # If file exists locally but not in store, try to find its ID (more complex, omitted for now)
-            # For now, we rely on the in-memory store populated during the session.
-            # A persistent mapping (e.g., in a file or DB) would be more robust.
-            log.warning("File '%s' not in memory store, proceeding with caution.", filename)
-            # pass # Or raise ValueError("File not found in current session. Upload first.")
+        # Even if not in store, if it exists locally and potentially in the vector store from previous session,
+        # we can try asking. The context prompt is key.
 
+        # Use the specific vector store ID
         fs_tool = {
             "type": "file_search",
-            "vector_store_ids": [self.vector_store_id],
-            "max_num_results": 5
+            "vector_store_ids": [self.vector_store_id], # Use the specific store
+            "max_num_results": 5 # Limit results to potentially improve relevance
         }
 
-        # *** MODIFICATION: Add filename context to the input ***
-        contextual_question = f"Using the document named '{filename}', answer the following question: {question}"
-        log.info("Asking OpenAI with contextual question: %s", contextual_question)
+        # Prepend context to the user's question
+        context_prompt = self._get_file_context_prompt(filename)
+        full_question = f"{context_prompt}Answer the following question: {question}"
+        log.info("Asking OpenAI with contextual question: %s", full_question)
 
-        resp = self.client.responses.create(
-            model="gpt-4o-mini", # Changed model as gpt-4.1-mini does not exist - check documentation
-            input=contextual_question, # Use the contextual question
-            tools=[fs_tool]
-        )
+        try:
+            resp = self.client.responses.create(
+                model="gpt-4o-mini", # Use a capable model
+                input=full_question, # Use the full question with context
+                tools=[fs_tool]
+            )
+        except Exception as e:
+            log.error("OpenAI API call failed for 'ask': %s", e)
+            raise RuntimeError(f"Failed to get answer from OpenAI: {e}")
 
         # collect all output_text chunks from the assistant message
         texts: List[str] = []
-        for out in resp.output:
-            # out.type is e.g. "file_search_call" or "message"
-            if getattr(out, "type", None) == "message":
-                # out.content is a list of content blocks
-                for block in out.content:
-                    if getattr(block, "type", None) == "output_text":
-                        # block.text contains the actual assistant text
-                        texts.append(block.text)
+        if resp.output:
+            for out in resp.output:
+                if getattr(out, "type", None) == "message":
+                    for block in out.content:
+                        if getattr(block, "type", None) == "output_text":
+                            texts.append(block.text)
+        else:
+            log.warning("OpenAI response contained no output messages.")
+            return "Sorry, I couldn't retrieve an answer for that."
 
-        return " ".join(texts).strip()
+        return " ".join(texts).strip() if texts else "No text answer found in the response."
 
     def _generate_from_pdf(self, filename: str, prompt: str) -> List[str]:
-        """Internal helper to ask questions about the PDF with context."""
-        # *** MODIFICATION: Add filename context to the internal prompt ***
-        contextual_prompt = f"Regarding the document named '{filename}': {prompt}"
+        """Internal helper to ask specific generative questions about the PDF."""
+        # We use ask() which already adds the context.
+        # The prompt here is the specific task (list concepts, generate questions).
+        raw_answer = self.ask(filename, prompt)
 
-        raw = self.ask(
-            filename, # Pass filename here, ask() will add context again, which is slightly redundant but safe
-            prompt # Pass the original prompt, ask() adds context
-            # Or, more directly:
-            # raw = self._ask_internal(filename, contextual_prompt) # If we create _ask_internal without context prefix
-        )
+        # Process the raw answer into lines
         lines = [
             line.strip(" \u2022-0123456789. ") # Keep the stripping logic
-            for line in raw.splitlines()
+            for line in raw_answer.splitlines()
             if line.strip()
         ]
         return lines
 
     def concepts(self, filename: str) -> List[str]:
         """
-        Return a list of the key concepts in the document.
+        Return a list of the key concepts in the document, using context.
         """
-        prompt = "Por favor, enumera los conceptos clave tratados en este documento, uno por línea."
+        prompt = "List the key concepts discussed in this document, one per line."
         return self._generate_from_pdf(filename, prompt)
 
 
     def questions(self, filename: str) -> List[str]:
         """
-        Generate a short set of test questions about the document.
+        Generate a short set of test questions about the document, using context.
         """
-        prompt = "Genera cinco preguntas de prueba sobre el contenido de este documento, una por línea."
+        prompt = "Generate five test questions based on the content of this document, one per line."
         return self._generate_from_pdf(filename, prompt)
 
-    # Note: Consider adding a method to clear the _store or remove files from the vector store
-    # if strict isolation between uploads is absolutely required, but the context prompt is usually sufficient.
+    def get_current_filename(self) -> str | None:
+        """Returns the filename of the last uploaded PDF in this session."""
+        return self.current_filename
+
+    def clear_current_filename(self):
+        """Clears the currently active filename."""
+        self.current_filename = None
+        log.info("Cleared current active PDF filename.")
 
 ================================================
 File: /config.py
@@ -805,9 +856,13 @@ class GPIOController:
 ================================================
 File: /app.py
 ================================================
+# ================================================
+# File: /app.py
+# ================================================
 #!/usr/bin/env python3
 """
-Flask / Flask‑SocketIO server for STR, now with PDF concepts & questions.
+Flask / Flask‑SocketIO server for STR, now with PDF concepts & questions,
+chat UI, and Bluetooth control.
 """
 
 from __future__ import annotations
@@ -823,12 +878,17 @@ from agents import process_query
 from tts import generate_tts
 from realtime import RealtimeClient, INSTRUCTIONS
 from files import PDFManager
-from config import MIC_DEVICE_INDEX
-from config import MIC_DEVICE_INDEX, VECTOR_STORE_ID
-
+from config import MIC_DEVICE_INDEX, VECTOR_STORE_ID # Removed duplicate MIC_DEVICE_INDEX
+# Import Bluetooth functions
+import bluetooth as bt # Renamed to avoid conflict with standard library
 
 # ------------------------------------------------------------------
-logging.basicConfig(level=logging.INFO)
+# Basic Setup
+# ------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)5s | %(name)s | %(message)s", # Added format
+)
 load_dotenv()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -837,148 +897,479 @@ UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 os.makedirs(AUDIO_DIR, exist_ok=True)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+# ------------------------------------------------------------------
+# API Keys & Config
+# ------------------------------------------------------------------
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 VOICE_ID = os.getenv("VOICE_ID")
 MODEL_ID = os.getenv("MODEL_ID")
 if not all([ELEVENLABS_API_KEY, VOICE_ID, MODEL_ID]):
-    raise RuntimeError("Missing ELEVENLABS_API_KEY, VOICE_ID, MODEL_ID")
+    # Use logging instead of raising immediately for potentially optional features
+    logging.warning("Missing ElevenLabs API Key, Voice ID, or Model ID. TTS features might be limited.")
+    # Or raise RuntimeError("Missing ELEVENLABS_API_KEY, VOICE_ID, MODEL_ID") if critical
 
+# ------------------------------------------------------------------
+# Flask App and Extensions Initialization
+# ------------------------------------------------------------------
 app = Flask(__name__)
+# Secret key is needed for sessions, flash messages, etc. Good practice even if not used directly yet.
+app.config['SECRET_KEY'] = os.getenv('FLASK_SECRET_KEY', 'default-secret-key-please-change')
 socketio = SocketIO(app, cors_allowed_origins="*")
-eleven_client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
-openai_client = OpenAI()
+
+# ------------------------------------------------------------------
+# Service Clients Initialization
+# ------------------------------------------------------------------
+try:
+    eleven_client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
+except Exception as e:
+    logging.error("Failed to initialize ElevenLabs client: %s", e)
+    eleven_client = None # Allow app to run without ElevenLabs if init fails
+
+try:
+    openai_client = OpenAI() # Assumes OPENAI_API_KEY is set in env
+except Exception as e:
+    logging.error("Failed to initialize OpenAI client: %s", e)
+    # Decide if this is critical
+    raise RuntimeError(f"Failed to initialize OpenAI client: {e}") from e
+
 pdf_manager = PDFManager(UPLOAD_DIR, VECTOR_STORE_ID)
 
+# ------------------------------------------------------------------
+# Realtime Client Setup
+# ------------------------------------------------------------------
 def _broadcast(msg: str):
+    """Helper to broadcast messages via SocketIO."""
+    logging.info("Broadcasting message: %s", msg)
     socketio.emit("broadcast_text", {"message": msg}, namespace="/realtime")
 
-realtime_client = RealtimeClient(
-    instructions=INSTRUCTIONS,
-    voice="ash",
-    mic_index=MIC_DEVICE_INDEX,
-    on_text=_broadcast,
-)
+try:
+    realtime_client = RealtimeClient(
+        instructions=INSTRUCTIONS,
+        voice="ash", # Consider making this configurable
+        mic_index=MIC_DEVICE_INDEX,
+        on_text=_broadcast,
+    )
+except Exception as e:
+    logging.error("Failed to initialize RealtimeClient: %s", e)
+    # Decide how to handle this - maybe disable realtime tab?
+    realtime_client = None # Allow app to run but realtime might fail
 
+
+# ------------------------------------------------------------------
+# Basic Routes
+# ------------------------------------------------------------------
 @app.route("/")
 def index():
+    """Serve the main HTML page."""
     return render_template("index.html")
 
 @app.route("/audio_files/<path:filename>")
 def serve_audio(filename):
+    """Serve generated audio files."""
     return send_from_directory(AUDIO_DIR, filename)
 
 # ------------------------------------------------------------------#
-#  TTS                                                              #
+#  TTS Endpoint                                                     #
 # ------------------------------------------------------------------#
 @app.route("/api/tts", methods=["POST"])
 def tts_endpoint():
+    """Generate TTS from text."""
+    if not eleven_client:
+        return jsonify({"error": "TTS service not available"}), 503
+
     text = (request.get_json(silent=True) or {}).get("text", "").strip()
     if not text:
         return jsonify({"error": "No text provided"}), 400
-    res = generate_tts(text, eleven_client, VOICE_ID, MODEL_ID, AUDIO_DIR)
-    return jsonify(
-        {"message": res["message"], "audio_url": f"/audio_files/{res['mp3_filename']}"}
-    )
-
+    try:
+        res = generate_tts(text, eleven_client, VOICE_ID, MODEL_ID, AUDIO_DIR)
+        audio_url = f"/audio_files/{os.path.basename(res['mp3_filename'])}" # Use basename for safety
+        return jsonify({"message": res["message"], "audio_url": audio_url})
+    except Exception as e:
+        logging.exception("TTS generation failed")
+        return jsonify({"error": f"TTS generation failed: {e}"}), 500
 
 # ------------------------------------------------------------------#
-#  GPT Agent                                                        #
+#  GPT Agent Endpoint                                               #
 # ------------------------------------------------------------------#
 @app.route("/api/agent", methods=["POST"])
 def agent_endpoint():
+    """Process query with agent and generate TTS for the answer."""
+    if not eleven_client:
+        # Decide if agent should work without TTS
+        # return jsonify({"error": "TTS service not available, cannot process agent request"}), 503
+        pass # Allow agent to process, but response won't have audio
+
     query = (request.get_json(silent=True) or {}).get("query", "").strip()
     if not query:
         return jsonify({"error": "No query provided"}), 400
-    answer = process_query(query)
-    res = generate_tts(answer, eleven_client, VOICE_ID, MODEL_ID, AUDIO_DIR)
-    return jsonify(
-        {"message": answer, "audio_url": f"/audio_files/{res['mp3_filename']}"}
-    )
 
+    try:
+        answer = process_query(query)
+    except Exception as e:
+        logging.exception("Agent query processing failed")
+        return jsonify({"error": f"Agent processing failed: {e}"}), 500
+
+    # Generate TTS only if ElevenLabs client is available
+    audio_url = None
+    if eleven_client:
+        try:
+            res = generate_tts(answer, eleven_client, VOICE_ID, MODEL_ID, AUDIO_DIR)
+            audio_url = f"/audio_files/{os.path.basename(res['mp3_filename'])}"
+        except Exception as e:
+            logging.exception("TTS generation failed for agent response")
+            # Don't fail the whole request, just return without audio
+            # Fallthrough intentional
+    else:
+        logging.warning("ElevenLabs client not available, skipping TTS for agent response.")
+
+    return jsonify({"message": answer, "audio_url": audio_url})
 
 # ------------------------------------------------------------------
-# PDF – upload & ask & concepts & questions
+# PDF Endpoints – upload & ask & concepts & questions
 # ------------------------------------------------------------------
 @app.route("/api/pdf/upload", methods=["POST"])
 def pdf_upload():
+    """Upload a PDF, add to vector store, set as current."""
+    if 'file' not in request.files:
+        return jsonify({"error": "No file part in the request"}), 400
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"error": "No selected file"}), 400
+    if not file or not file.filename.lower().endswith(".pdf"):
+         return jsonify({"error": "Invalid file type, only PDF allowed"}), 400
+
     try:
-        info = pdf_manager.upload(request.files.get("file"))
+        # Pass the Werkzeug file object directly
+        info = pdf_manager.upload(file)
         return jsonify(info)
+    except ValueError as ve:
+        logging.warning("PDF upload validation error: %s", ve)
+        return jsonify({"error": str(ve)}), 400
     except Exception as exc:
         logging.exception("PDF upload failed")
-        return jsonify({"error": str(exc)}), 400
+        return jsonify({"error": f"An unexpected error occurred during upload: {exc}"}), 500
 
 @app.route("/api/pdf/ask", methods=["POST"])
 def pdf_ask():
+    """Ask a question about the currently active PDF."""
     data = request.get_json(silent=True) or {}
     question = data.get("question", "").strip()
+    # Use the filename managed by PDFManager if not explicitly passed,
+    # but it's better if frontend sends the filename it knows it uploaded.
     filename = data.get("filename")
-    if not question or not filename:
-        return jsonify({"error": "Invalid request"}), 400
+
+    if not filename:
+        # Fallback to the manager's current file if frontend doesn't send it
+        filename = pdf_manager.get_current_filename()
+        if not filename:
+            return jsonify({"error": "No PDF file specified or previously uploaded in this session."}), 400
+        logging.warning("Request did not specify filename, using current: %s", filename)
+
+    if not question:
+        return jsonify({"error": "No question provided"}), 400
+
     try:
         answer = pdf_manager.ask(filename, question)
-        res = generate_tts(answer, eleven_client, VOICE_ID, MODEL_ID, AUDIO_DIR)
-        return jsonify({"answer": answer, "audio_url": f"/audio_files/{res['mp3_filename']}"})
+        # Generate TTS if available
+        audio_url = None
+        if eleven_client:
+            try:
+                res = generate_tts(answer, eleven_client, VOICE_ID, MODEL_ID, AUDIO_DIR)
+                audio_url = f"/audio_files/{os.path.basename(res['mp3_filename'])}"
+            except Exception as e:
+                logging.exception("TTS generation failed for PDF answer")
+                # Continue without audio if TTS fails
+        else:
+            logging.warning("ElevenLabs client not available, skipping TTS for PDF answer.")
+
+        return jsonify({"answer": answer, "audio_url": audio_url})
+    except ValueError as ve:
+        logging.warning("PDF ask validation error: %s", ve)
+        return jsonify({"error": str(ve)}), 400
     except Exception as exc:
         logging.exception("PDF ask error")
-        return jsonify({"error": str(exc)}), 400
+        return jsonify({"error": f"An unexpected error occurred while asking: {exc}"}), 500
+
+# Simplified concepts/questions using the same structure as ask
 @app.route("/api/pdf/concepts", methods=["POST"])
 def pdf_concepts():
-    data = request.get_json() or {}
-    fn   = data.get("filename")
-    if not fn: return jsonify({"error":"No filename"}),400
+    """Get key concepts from the specified PDF."""
+    data = request.get_json(silent=True) or {}
+    filename = data.get("filename")
+    if not filename:
+        filename = pdf_manager.get_current_filename()
+        if not filename: return jsonify({"error":"No PDF file specified or active."}), 400
+        logging.warning("Request did not specify filename, using current: %s", filename)
+
     try:
-        concepts = pdf_manager.concepts(fn)
-        return jsonify({"concepts":concepts})
+        concepts = pdf_manager.concepts(filename)
+        return jsonify({"concepts": concepts})
+    except ValueError as ve: return jsonify({"error":str(ve)}), 400
     except Exception as e:
         logging.exception("PDF concepts error")
-        return jsonify({"error":str(e)}),400
+        return jsonify({"error":f"Failed to get concepts: {e}"}), 500
 
 @app.route("/api/pdf/questions", methods=["POST"])
 def pdf_questions():
-    data = request.get_json() or {}
-    fn   = data.get("filename")
-    if not fn: return jsonify({"error":"No filename"}),400
+    """Generate test questions from the specified PDF."""
+    data = request.get_json(silent=True) or {}
+    filename = data.get("filename")
+    if not filename:
+        filename = pdf_manager.get_current_filename()
+        if not filename: return jsonify({"error":"No PDF file specified or active."}), 400
+        logging.warning("Request did not specify filename, using current: %s", filename)
+
     try:
-        questions = pdf_manager.questions(fn)
-        return jsonify({"questions":questions})
+        questions = pdf_manager.questions(filename)
+        return jsonify({"questions": questions})
+    except ValueError as ve: return jsonify({"error":str(ve)}), 400
     except Exception as e:
         logging.exception("PDF questions error")
-        return jsonify({"error":str(e)}),400
+        return jsonify({"error":f"Failed to generate questions: {e}"}), 500
 
 # ------------------------------------------------------------------#
-#  SocketIO – realtime                                              #
+#  Bluetooth Endpoints                                              #
+# ------------------------------------------------------------------#
+@app.route("/api/bluetooth/status", methods=["GET"])
+def bluetooth_status():
+    """Get current Bluetooth status."""
+    status = bt.get_bluetooth_status()
+    return jsonify(status)
+
+@app.route("/api/bluetooth/discoverable", methods=["POST"])
+def bluetooth_discoverable():
+    """Set Bluetooth discoverable state."""
+    data = request.get_json(silent=True) or {}
+    enable = data.get("enable", False) # Default to disabling
+    duration = data.get("duration", 180) # Default duration
+    try:
+        success, message = bt.set_discoverable(enable, duration)
+        if success:
+            return jsonify({"success": True, "message": message})
+        else:
+            return jsonify({"success": False, "message": message}), 500
+    except Exception as e:
+        logging.exception("Error setting discoverable state")
+        return jsonify({"success": False, "message": f"Server error: {e}"}), 500
+
+@app.route("/api/bluetooth/pairable", methods=["POST"])
+def bluetooth_pairable():
+    """Set Bluetooth pairable state."""
+    data = request.get_json(silent=True) or {}
+    enable = data.get("enable", False) # Default to disabling
+    try:
+        success, message = bt.set_pairable(enable)
+        if success:
+            return jsonify({"success": True, "message": message})
+        else:
+            return jsonify({"success": False, "message": message}), 500
+    except Exception as e:
+        logging.exception("Error setting pairable state")
+        return jsonify({"success": False, "message": f"Server error: {e}"}), 500
+
+
+# ------------------------------------------------------------------#
+#  SocketIO – Realtime                                              #
 # ------------------------------------------------------------------#
 @socketio.on("connect", namespace="/realtime")
 def rt_connect():
-    emit("status", {"message": "Ready"})
+    """Handle client connection to realtime namespace."""
+    logging.info("Client connected to /realtime namespace")
+    if realtime_client:
+        emit("status", {"message": "Ready"})
+    else:
+        emit("status", {"message": "Realtime Error: Service unavailable"})
 
+
+@socketio.on("disconnect", namespace="/realtime")
+def rt_disconnect():
+    """Handle client disconnection."""
+    logging.info("Client disconnected from /realtime namespace")
+    # Optional: Add any cleanup if needed when a client disconnects
 
 @socketio.on("start_talking", namespace="/realtime")
 def rt_start():
-    realtime_client.start_talking()
-    emit("status", {"message": "Recording…"})
+    """Start audio streaming to Realtime API."""
+    if realtime_client:
+        try:
+            realtime_client.start_talking()
+            emit("status", {"message": "Recording…"})
+        except Exception as e:
+            logging.exception("Error starting realtime talking")
+            emit("status", {"message": f"Error: {e}"})
+    else:
+        emit("status", {"message": "Realtime Error: Service unavailable"})
 
 
 @socketio.on("stop_talking", namespace="/realtime")
 def rt_stop():
-    realtime_client.stop_talking()
-    emit("status", {"message": "Processing…"})
+    """Stop audio streaming."""
+    if realtime_client:
+        try:
+            realtime_client.stop_talking()
+            emit("status", {"message": "Processing…"}) # Status indicates processing starts
+        except Exception as e:
+            logging.exception("Error stopping realtime talking")
+            emit("status", {"message": f"Error: {e}"})
+    else:
+        emit("status", {"message": "Realtime Error: Service unavailable"})
 
 
 @socketio.on("send_text", namespace="/realtime")
 def rt_send_text(data):
+    """Send text input to the Realtime API."""
     text = (data or {}).get("text", "").strip()
-    if text:
-        realtime_client.send_text(text)
+    if text and realtime_client:
+        try:
+            logging.info("Sending text to realtime: %s", text)
+            realtime_client.send_text(text)
+            # Optionally emit a status or confirmation
+            # emit("status", {"message": "Text sent..."})
+        except Exception as e:
+            logging.exception("Error sending text to realtime")
+            emit("status", {"message": f"Error sending text: {e}"})
+    elif not realtime_client:
+         emit("status", {"message": "Realtime Error: Service unavailable"})
 
 
 # ------------------------------------------------------------------#
-#  Main                                                             #
+#  Main Execution                                                   #
 # ------------------------------------------------------------------#
 if __name__ == "__main__":
-    socketio.run(app, host="0.0.0.0", port=5000, debug=True)
+    host = os.getenv("FLASK_HOST", "0.0.0.0")
+    port = int(os.getenv("FLASK_PORT", "5000"))
+    debug = os.getenv("FLASK_DEBUG", "True").lower() == "true" # Control debug via env var
 
+    logging.info(f"Starting Flask app on {host}:{port} (Debug: {debug})")
+    # Use SocketIO's run method which integrates Werkzeug server
+    socketio.run(app, host=host, port=port, debug=debug, use_reloader=debug)
+
+================================================
+File: /bluetooth.py
+================================================
+# ================================================
+# File: /bluetooth.py
+# ================================================
+#!/usr/bin/env python3
+"""
+Bluetooth control functions using bluetoothctl via subprocess.
+"""
+
+import subprocess
+import logging
+import time
+
+log = logging.getLogger("bluetooth")
+
+def _run_bt_command(command: str, timeout: int = 10) -> tuple[bool, str]:
+    """Runs a command within bluetoothctl."""
+    cmd_sequence = f"echo -e '{command}\\nexit' | bluetoothctl"
+    log.info("Running bluetoothctl command: %s", command)
+    try:
+        process = subprocess.run(
+            cmd_sequence,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False # Don't raise exception on non-zero exit code immediately
+        )
+        stdout = process.stdout.strip()
+        stderr = process.stderr.strip()
+
+        if process.returncode != 0:
+            log.error("bluetoothctl command '%s' failed with code %d", command, process.returncode)
+            log.error("Stderr: %s", stderr)
+            return False, f"Command failed: {stderr or stdout or 'Unknown error'}"
+
+        log.info("bluetoothctl command '%s' successful.", command)
+        log.debug("Stdout: %s", stdout)
+        return True, stdout
+
+    except subprocess.TimeoutExpired:
+        log.error("bluetoothctl command '%s' timed out after %d seconds.", command, timeout)
+        return False, "Command timed out"
+    except Exception as e:
+        log.exception("Error running bluetoothctl command '%s'", command)
+        return False, f"Exception: {e}"
+
+def set_discoverable(enable: bool, duration: int = 180) -> tuple[bool, str]:
+    """Enable or disable Bluetooth discoverability."""
+    state = "on" if enable else "off"
+    # Set duration if enabling
+    if enable:
+        success, msg = _run_bt_command(f"discoverable-timeout {duration}")
+        if not success:
+            # Don't stop if timeout fails, just warn
+            log.warning("Failed to set discoverable timeout: %s", msg)
+            # return False, f"Failed to set discoverable timeout: {msg}" # Or just warn and continue
+    # Now set discoverable state
+    success, msg = _run_bt_command(f"discoverable {state}")
+    return success, f"Discoverable set to {state}. {msg}"
+
+def set_pairable(enable: bool) -> tuple[bool, str]:
+    """Enable or disable Bluetooth pairing."""
+    state = "on" if enable else "off"
+    success, msg = _run_bt_command(f"pairable {state}")
+    return success, f"Pairable set to {state}. {msg}"
+
+def get_bluetooth_status() -> dict:
+    """Get basic Bluetooth status (powered, discoverable, pairable)."""
+    # This is a bit more complex as bluetoothctl is interactive.
+    # We can try fetching properties using specific commands.
+    status = {
+        "powered": None,
+        "discoverable": None,
+        "pairable": None,
+        "error": None,
+        "controller_info": None
+    }
+    try:
+        # Check power status
+        success_show, output_show = _run_bt_command("show", timeout=5)
+        if success_show:
+            status["controller_info"] = output_show # Store full output
+            status["powered"] = "Powered: yes" in output_show
+            status["discoverable"] = "Discoverable: yes" in output_show
+            status["pairable"] = "Pairable: yes" in output_show
+        else:
+            status["error"] = f"Failed to get controller info: {output_show}"
+
+    except Exception as e:
+        log.exception("Error getting Bluetooth status")
+        status["error"] = f"Exception fetching status: {e}"
+
+    log.info("Bluetooth status fetched: %s", status)
+    return status
+
+# Example usage (can be run standalone for testing)
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    log.info("Testing Bluetooth functions...")
+
+    print("\nGetting initial status:")
+    print(get_bluetooth_status())
+
+    print("\nEnabling discoverable and pairable...")
+    set_discoverable(True)
+    time.sleep(1)
+    set_pairable(True)
+    time.sleep(1)
+
+    print("\nGetting status after enabling:")
+    print(get_bluetooth_status())
+    print("\nDevice should be discoverable/pairable for 3 minutes...")
+    print("Sleeping for 10 seconds...")
+    time.sleep(10)
+
+    print("\nDisabling discoverable and pairable...")
+    set_discoverable(False)
+    time.sleep(1)
+    set_pairable(False)
+    time.sleep(1)
+
+    print("\nGetting final status:")
+    print(get_bluetooth_status())
 
 ================================================
 File: /templates/index.html
@@ -987,286 +1378,404 @@ File: /templates/index.html
 <html lang="es">
   <head>
     <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>STR Proyecto</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.4/socket.io.js"></script>
     <style>
-      /* Basic chat styling */
+      /* Basic chat styling & Layout */
       .chat-container {
         display: flex;
         flex-direction: column;
-        /* Adjust height based on your overall layout needs.
-           Maybe subtract header/tab height if they are fixed. */
-        height: calc(100vh - 150px); /* Example: Adjust 150px as needed */
-        max-height: 75vh; /* Limit overall height */
+        /* Height calculation: screen height minus approx header/tabs/padding */
+        height: calc(100vh - 200px); /* START ADJUSTING THIS VALUE */
+        max-height: 70vh; /* Absolute max height */
+        min-height: 300px; /* Minimum sensible height */
       }
       .chat-history {
         flex-grow: 1; /* Takes available space */
         overflow-y: auto; /* Enables scrolling */
-        padding: 1rem; /* Add padding */
+        padding: 1rem 1.5rem; /* More horizontal padding */
         display: flex;
         flex-direction: column;
-        gap: 0.75rem; /* Space between bubbles */
+        gap: 0.8rem; /* Space between bubbles */
+        background-color: #f9fafb; /* Slightly off-white background for chat area */
       }
       .chat-input-area {
-        padding: 1rem; /* Add padding */
+        padding: 1rem 1.5rem; /* Match history padding */
         border-top: 1px solid #e5e7eb; /* Separator line */
-        background-color: #f9fafb; /* Slight background differentiation */
+        background-color: #ffffff; /* White background for input */
+        flex-shrink: 0; /* Prevent input area from shrinking */
       }
-      .input-box { /* General style for text inputs/areas */
-        padding: 0.75rem 1rem;
+      .input-box {
+        /* General style for text inputs/areas */
+        padding: 0.6rem 1rem; /* Slightly reduced padding */
         border: 1px solid #d1d5db;
         border-radius: 0.375rem;
         flex-grow: 1; /* Input takes available width */
-        outline-none;
-        focus:border-blue-500 focus:ring-1 focus:ring-blue-500; /* Basic focus style */
+        outline: none;
+        transition: border-color 0.2s ease;
+        resize: none; /* Disable textarea resizing handle */
+      }
+      .input-box:focus {
+        border-color: #2563eb;
+        box-shadow: 0 0 0 1px #2563eb;
       }
       .bubble {
         padding: 0.75rem 1rem;
         border-radius: 0.75rem; /* Slightly more rounded */
-        max-width: 80%;
+        max-width: 85%; /* Allow slightly wider bubbles */
         word-wrap: break-word; /* Prevent long words from overflowing */
-        box-shadow: 0 1px 2px rgba(0,0,0,0.05); /* Subtle shadow */
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05); /* Subtle shadow */
+        line-height: 1.5; /* Improve readability */
       }
       .user {
         background-color: #dbeafe; /* Lighter blue */
-        color: #1e40af;
+        color: #1e3a8a; /* Darker blue text */
         align-self: flex-end;
         border-bottom-right-radius: 0.25rem; /* Tail effect */
+        margin-left: auto; /* Push to right */
       }
       .bot {
-        background-color: #f3f4f6; /* Lighter gray */
+        background-color: #e5e7eb; /* Lighter gray */
         color: #1f2937;
         align-self: flex-start;
         border-bottom-left-radius: 0.25rem; /* Tail effect */
+        margin-right: auto; /* Push to left */
+      }
+      /* Buttons */
+      .btn {
+        /* Base button style */
+        padding: 0.5rem 1.1rem; /* Adjusted padding */
+        border-radius: 0.375rem;
+        font-weight: 500;
+        white-space: nowrap; /* Prevent button text wrapping */
+        transition: background-color 0.2s ease, box-shadow 0.2s ease;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .btn:focus {
+        outline: none;
+        box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.5); /* Focus ring */
       }
       .btn-primary {
         background-color: #2563eb; /* Tailwind blue-600 */
         color: white;
-        padding: 0.6rem 1.2rem; /* Slightly larger padding */
-        border-radius: 0.375rem;
-        font-weight: 500;
-        white-space: nowrap; /* Prevent button text wrapping */
-        transition: background-color 0.2s ease;
       }
       .btn-primary:hover {
         background-color: #1d4ed8; /* Darker blue */
       }
       .btn-primary:disabled {
-          background-color: #9ca3af;
-          cursor: not-allowed;
+        background-color: #9ca3af;
+        cursor: not-allowed;
+        opacity: 0.7;
       }
       .btn-secondary {
         background-color: #6b7280; /* Gray-500 */
         color: white;
-        padding: 0.6rem 1.2rem;
-        border-radius: 0.375rem;
-        font-weight: 500;
-        white-space: nowrap;
-        transition: background-color 0.2s ease;
       }
       .btn-secondary:hover {
         background-color: #4b5563; /* Darker gray */
       }
-       .btn-secondary:disabled {
-          background-color: #9ca3af;
-          cursor: not-allowed;
+      .btn-secondary:disabled {
+        background-color: #9ca3af;
+        cursor: not-allowed;
+        opacity: 0.7;
       }
       audio {
         width: 100%;
-        margin-top: 0.5rem;
+        margin-top: 0.75rem; /* More space above audio player */
+        display: block; /* Ensure it takes full width */
+        height: 40px; /* Standard height */
       }
       /* Tab styling */
       .tab {
-        padding: 0.5rem 1rem;
+        padding: 0.75rem 1.25rem; /* Slightly larger tabs */
         border-bottom: 3px solid transparent; /* Thicker underline */
-        color: #6b7280; /* Default tab color */
+        color: #4b5563; /* Default tab color (gray-600) */
         font-weight: 500;
         transition: all 0.2s ease;
+        text-align: center;
       }
       .tab:hover {
-        color: #3b82f6; /* Blue on hover */
+        color: #1d4ed8; /* Darker blue on hover */
+        background-color: #eff6ff; /* Light blue background on hover */
       }
       .tab.active {
         border-color: #2563eb; /* Blue underline for active */
-        color: #2563eb; /* Blue text for active */
+        color: #1e40af; /* Darker blue text for active */
         font-weight: 600;
       }
       /* Hide scrollbar for cleaner look (optional) */
-      .chat-history::-webkit-scrollbar { display: none; }
-      .chat-history { -ms-overflow-style: none; scrollbar-width: none; }
+      .chat-history::-webkit-scrollbar {
+        display: none;
+      }
+      .chat-history {
+        -ms-overflow-style: none;
+        scrollbar-width: none;
+      }
+
+      /* Status message styling */
+      .status-message {
+        text-align: center;
+        font-size: 0.875rem; /* text-sm */
+        color: #6b7280; /* gray-500 */
+        padding: 0.5rem 1rem;
+        background-color: #f3f4f6; /* gray-100 */
+        border-radius: 9999px; /* rounded-full */
+        align-self: center; /* Center horizontally */
+        margin: 0.5rem auto; /* Add some margin */
+      }
+      /* Bluetooth Switch Styling */
+      .switch {
+        position: relative;
+        display: inline-block;
+        width: 50px;
+        height: 24px;
+      }
+      .switch input {
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+      .slider {
+        position: absolute;
+        cursor: pointer;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background-color: #ccc;
+        transition: 0.4s;
+        border-radius: 24px;
+      }
+      .slider:before {
+        position: absolute;
+        content: "";
+        height: 18px;
+        width: 18px;
+        left: 3px;
+        bottom: 3px;
+        background-color: white;
+        transition: 0.4s;
+        border-radius: 50%;
+      }
+      input:checked + .slider {
+        background-color: #2563eb;
+      }
+      input:checked + .slider:before {
+        transform: translateX(26px);
+      }
     </style>
   </head>
-  <body class="bg-gray-100 text-gray-900 font-sans">
-    <!-- Changed bg, added font -->
+  <body class="bg-gray-100 text-gray-900 font-sans antialiased">
+    <!-- Added antialiased -->
     <div
-      class="max-w-3xl mx-auto py-6 px-4 sm:px-6 lg:px-8 flex flex-col gap-5"
+      class="max-w-4xl mx-auto py-6 px-4 sm:px-6 lg:px-8 flex flex-col gap-5"
     >
-      <!-- Adjusted max-width, padding -->
+      <!-- Increased max-width slightly -->
       <!-- Title -->
-      <h1 class="text-3xl font-bold text-center text-gray-800">
+      <h1 class="text-3xl font-bold text-center text-gray-800 tracking-tight">
         📡 Proyecto STR
       </h1>
 
       <!-- Tabs -->
       <nav class="flex justify-center border-b border-gray-300 pb-0" id="tabs">
-        <!-- Center tabs -->
         <button data-tab="tts" class="tab active">TTS</button>
         <button data-tab="agent" class="tab">Agent</button>
         <button data-tab="realtime" class="tab">Realtime</button>
         <button data-tab="pdf" class="tab">PDF</button>
+        <button data-tab="bluetooth" class="tab">Bluetooth</button>
+        <!-- New Tab -->
       </nav>
 
       <!-- Panels Container -->
-      <div class="bg-white rounded-lg shadow-md overflow-hidden">
-        <!-- Card-like container for panels -->
+      <div class="bg-white rounded-lg shadow-lg overflow-hidden">
+        <!-- Increased shadow -->
 
         <!-- ------------ TTS ------------- -->
         <section id="panel-tts" class="panel chat-container">
-          <!-- History Area -->
-          <div id="ttsFeed" class="chat-history">
-            <!-- Bubbles will be appended here -->
-          </div>
-          <!-- Input Area -->
-          <div class="chat-input-area flex flex-col sm:flex-row gap-3">
+          <div id="ttsFeed" class="chat-history"></div>
+          <div
+            class="chat-input-area flex flex-col sm:flex-row gap-3 items-center"
+          >
             <textarea
               id="ttsInput"
-              class="input-box resize-none flex-grow"
+              class="input-box"
               placeholder="Escribe texto…"
-              rows="2"
+              rows="1"
             ></textarea>
-            <div class="flex gap-2 justify-end sm:justify-start">
-              <button id="ttsSend" class="btn-primary">Enviar</button>
-              <button id="ttsClear" class="btn-secondary">Limpiar</button>
+            <!-- rows="1" for shorter initial height -->
+            <div class="flex gap-2 flex-shrink-0">
+              <button id="ttsSend" class="btn btn-primary">Enviar</button>
+              <button id="ttsClear" class="btn btn-secondary">Limpiar</button>
             </div>
           </div>
         </section>
 
         <!-- ------------ Agent ----------- -->
         <section id="panel-agent" class="panel chat-container hidden">
-          <!-- History Area -->
-          <div id="agentFeed" class="chat-history">
-            <!-- Bubbles will be appended here -->
-          </div>
-          <!-- Input Area -->
-          <div class="chat-input-area flex flex-col sm:flex-row gap-3">
+          <div id="agentFeed" class="chat-history"></div>
+          <div
+            class="chat-input-area flex flex-col sm:flex-row gap-3 items-center"
+          >
             <textarea
               id="agentInput"
-              class="input-box resize-none flex-grow"
+              class="input-box"
               placeholder="Pregunta…"
-              rows="2"
+              rows="1"
             ></textarea>
-            <div class="flex gap-2 justify-end sm:justify-start">
-              <button id="agentSend" class="btn-primary">Enviar</button>
-              <button id="agentClear" class="btn-secondary">Limpiar</button>
+            <!-- rows="1" -->
+            <div class="flex gap-2 flex-shrink-0">
+              <button id="agentSend" class="btn btn-primary">Enviar</button>
+              <button id="agentClear" class="btn btn-secondary">Limpiar</button>
             </div>
           </div>
         </section>
 
         <!-- -------- Realtime ------------ -->
         <section id="panel-realtime" class="panel chat-container hidden">
-          <!-- History Area -->
           <div id="realtimeFeed" class="chat-history">
-            <!-- Bubbles will be appended here -->
-            <p
-              id="realtimeStatus"
-              class="text-sm text-center text-gray-500 px-4 py-2 self-center bg-gray-100 rounded-full"
-            >
-              Initializing...
-            </p>
+            <p id="realtimeStatus" class="status-message">Initializing...</p>
           </div>
-          <!-- Input Area -->
           <div class="chat-input-area flex flex-col gap-4">
-            <div class="flex flex-wrap gap-2 justify-center">
-              <!-- Centered buttons -->
-              <button id="startTalking" class="btn-primary">🎙️ Start</button>
+            <div class="flex flex-wrap gap-3 justify-center">
+              <button id="startTalking" class="btn btn-primary">
+                🎙️ Start
+              </button>
               <!-- Added nbsp -->
-              <button id="stopTalking" class="btn-secondary" disabled>
+              <button id="stopTalking" class="btn btn-secondary" disabled>
                 ⏹️ Stop
               </button>
-              <button id="rtClear" class="btn-secondary">Limpiar</button>
+              <button id="rtClear" class="btn btn-secondary">Limpiar</button>
             </div>
-            <div class="flex gap-2">
+            <div class="flex gap-3 items-center">
               <input
                 id="realtimeText"
-                class="input-box flex-grow"
+                class="input-box"
                 placeholder="Enviar texto al aire…"
               />
-              <button id="realtimeTextSend" class="btn-primary">Enviar</button>
+              <button
+                id="realtimeTextSend"
+                class="btn btn-primary flex-shrink-0"
+              >
+                Enviar
+              </button>
             </div>
           </div>
         </section>
 
         <!-- ------------- PDF ------------ -->
         <section id="panel-pdf" class="panel chat-container hidden">
-          <!-- History Area -->
           <div id="pdfFeed" class="chat-history">
-            <!-- Bubbles will be appended here -->
-            <p
-              id="pdfUploadStatus"
-              class="text-sm text-center text-gray-500 px-4 py-2 self-center bg-gray-100 rounded-full"
-            >
+            <p id="pdfUploadStatus" class="status-message">
               Elige un PDF para cargar…
             </p>
           </div>
-          <!-- Input Area -->
           <div class="chat-input-area flex flex-col gap-3">
-            <!-- File chooser -->
             <input
               type="file"
               id="pdfFile"
               accept="application/pdf"
-              class="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 cursor-pointer"
+              class="block w-full text-sm text-gray-700 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-100 file:text-blue-700 hover:file:bg-blue-200 cursor-pointer border border-gray-300 rounded-lg p-1"
             />
-            <!-- Q&A controls (initially hidden) -->
-            <div id="pdfQA" class="hidden flex flex-col sm:flex-row gap-3 mt-2">
+            <div
+              id="pdfQA"
+              class="hidden flex flex-col sm:flex-row gap-3 mt-2 items-center"
+            >
               <input
                 id="pdfQuestion"
                 class="input-box flex-grow"
                 placeholder="Pregunta sobre tu PDF…"
               />
-              <div class="flex gap-2 justify-end sm:justify-start">
-                <button id="pdfAsk" class="btn-primary">Preguntar</button>
-                <button id="pdfClear" class="btn-secondary">Limpiar</button>
+              <div class="flex gap-2 flex-shrink-0">
+                <button id="pdfAsk" class="btn btn-primary">Preguntar</button>
+                <button id="pdfClear" class="btn btn-secondary">Limpiar</button>
               </div>
             </div>
           </div>
+        </section>
+
+        <!-- ---------- Bluetooth ----------- -->
+        <section
+          id="panel-bluetooth"
+          class="panel hidden p-6 flex flex-col gap-4 items-center"
+        >
+          <h2 class="text-xl font-semibold text-gray-700">Control Bluetooth</h2>
+          <div
+            class="flex items-center gap-4 p-4 border border-gray-200 rounded-lg bg-gray-50 w-full max-w-md"
+          >
+            <span class="font-medium text-gray-600"
+              >Enable Discoverability & Pairing:</span
+            >
+            <label class="switch">
+              <input type="checkbox" id="btToggle" />
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div
+            id="bluetoothStatus"
+            class="mt-4 text-sm text-gray-600 p-3 border border-gray-200 rounded-lg bg-gray-50 w-full max-w-md"
+          >
+            <p>
+              <strong>Status:</strong>
+              <span id="btStatusText">Fetching...</span>
+            </p>
+            <p><strong>Powered:</strong> <span id="btPowered">...</span></p>
+            <p>
+              <strong>Discoverable:</strong>
+              <span id="btDiscoverable">...</span>
+            </p>
+            <p><strong>Pairable:</strong> <span id="btPairable">...</span></p>
+            <p id="btError" class="text-red-600 mt-1"></p>
+          </div>
+          <button id="btRefreshStatus" class="btn btn-secondary mt-2">
+            Refresh Status
+          </button>
         </section>
       </div>
       <!-- End Card-like container -->
     </div>
 
-    <!-- Keep existing script tag -->
     <script>
-      const socket = io("/realtime");
+      const socket = io("/realtime", { transports: ["websocket"] }); // Force websocket if needed
       const el = (sel) => document.querySelector(sel);
-      // Helper to clear feed and add back status messages if needed
+      const elAll = (sel) => document.querySelectorAll(sel);
+
+      // --- Helper Functions ---
+      function showToast(message, type = "info") {
+        // Basic toast notification (implement a library later if needed)
+        console.log(`TOAST (${type}): ${message}`);
+        // You could add a simple div temporarily appearing on screen here
+      }
+
       const feedClear = (feedSel, statusSel = null, initialMsg = "") => {
         const feed = el(feedSel);
+        if (!feed) return;
         feed.innerHTML = "";
-        if (statusSel && initialMsg) {
-          // Re-add status message if applicable (like for PDF/Realtime)
+        if (statusSel) {
           const statusElement = el(statusSel);
           if (statusElement) {
             // If status is inside the feed, re-create it
             if (feed.contains(statusElement)) {
               const p = document.createElement("p");
               p.id = statusElement.id; // Keep the ID
-              p.className = statusElement.className; // Keep classes
+              p.className = "status-message"; // Use consistent class
               p.textContent = initialMsg;
               feed.appendChild(p);
-            } else {
-              // If status is outside feed, just update text
-              statusElement.textContent = initialMsg;
             }
           }
         }
       };
 
-      function appendBubble(feedSel, text, who, audioUrl) {
+      function appendBubble(feedSel, text, who, audioUrl = null) {
         const feed = el(feedSel);
+        if (!feed) return;
+
         // Remove any initial status message placeholder inside the feed
-        const statusMsg = feed.querySelector('p[id$="Status"]'); // Find status <p> if it's inside
+        const statusMsg = feed.querySelector(".status-message");
         if (
           statusMsg &&
           feed.children.length === 1 &&
@@ -1275,263 +1784,428 @@ File: /templates/index.html
           statusMsg.remove();
         }
 
-        const div = document.createElement("div");
-        div.className = `bubble ${who}`;
-        // Sanitize text before inserting as HTML to prevent XSS
+        const bubbleDiv = document.createElement("div");
+        bubbleDiv.className = `bubble ${who}`;
+
         const textNode = document.createElement("p");
-        textNode.textContent = text; // Use textContent for safety
-        div.appendChild(textNode);
+        textNode.textContent = text; // Use textContent for safety against XSS
+        bubbleDiv.appendChild(textNode);
 
         if (audioUrl) {
-          const audio = document.createElement("audio");
-          audio.controls = true;
-          audio.src = audioUrl;
-          audio.className = "mt-2 w-full"; // Add margin top
-          div.appendChild(audio);
+          try {
+            const audio = document.createElement("audio");
+            audio.controls = true;
+            // Preload metadata to potentially get duration faster, etc.
+            audio.preload = "metadata";
+            audio.src = audioUrl;
+            audio.className = "mt-2 w-full"; // Add margin top
+            bubbleDiv.appendChild(audio);
+          } catch (e) {
+            console.error("Error creating audio element:", e);
+            const errorP = document.createElement("p");
+            errorP.className = "text-red-500 text-xs mt-1";
+            errorP.textContent = "Could not load audio player.";
+            bubbleDiv.appendChild(errorP);
+          }
         }
-        feed.appendChild(div);
+        feed.appendChild(bubbleDiv);
+
         // Scroll to the bottom smoothly
-        feed.scrollTo({ top: feed.scrollHeight, behavior: "smooth" });
+        // Use requestAnimationFrame for potentially smoother scroll on rapid updates
+        requestAnimationFrame(() => {
+          feed.scrollTo({ top: feed.scrollHeight, behavior: "smooth" });
+        });
+      }
+
+      async function apiCall(endpoint, method = "POST", body = null) {
+        try {
+          const options = {
+            method: method,
+            headers: {},
+          };
+          if (body) {
+            if (body instanceof FormData) {
+              // Let browser set Content-Type for FormData
+            } else {
+              options.headers["Content-Type"] = "application/json";
+              options.body = JSON.stringify(body);
+            }
+          }
+          if (body && !(body instanceof FormData)) {
+            options.body = JSON.stringify(body);
+          } else if (body instanceof FormData) {
+            options.body = body; // Assign FormData directly
+          }
+
+          const response = await fetch(endpoint, options);
+          const data = await response.json(); // Assume JSON response
+
+          if (!response.ok) {
+            throw new Error(
+              data.error || data.message || `HTTP error ${response.status}`
+            );
+          }
+          return data; // Contains success: true/false and message/data
+        } catch (error) {
+          console.error(`API call to ${endpoint} failed:`, error);
+          // Return an error structure consistent with expected JSON errors
+          return { success: false, error: error.message };
+        }
       }
 
       /* ---------- Tabs ---------- */
-      document.querySelectorAll("#tabs .tab").forEach((btn) => {
-        btn.onclick = () => {
-          document
-            .querySelectorAll("#tabs .tab")
-            .forEach((b) => b.classList.remove("active"));
-          btn.classList.add("active");
-          document
-            .querySelectorAll(".panel")
-            .forEach((p) => p.classList.add("hidden"));
-          const activePanel = el(`#panel-${btn.dataset.tab}`);
-          activePanel.classList.remove("hidden");
-          // Scroll to bottom of history when switching tabs
-          const history = activePanel.querySelector(".chat-history");
-          if (history) {
-            history.scrollTop = history.scrollHeight;
-          }
+      const tabs = elAll("#tabs .tab");
+      const panels = elAll(".panel");
+
+      tabs.forEach((tab) => {
+        tab.onclick = () => {
+          tabs.forEach((t) => t.classList.remove("active"));
+          tab.classList.add("active");
+
+          const targetPanelId = `panel-${tab.dataset.tab}`;
+          panels.forEach((p) => {
+            if (p.id === targetPanelId) {
+              p.classList.remove("hidden");
+              // Scroll chat history to bottom when tab becomes active
+              const history = p.querySelector(".chat-history");
+              if (history) {
+                requestAnimationFrame(() => {
+                  history.scrollTop = history.scrollHeight;
+                });
+              }
+              // Special action for Bluetooth tab
+              if (tab.dataset.tab === "bluetooth") {
+                refreshBluetoothStatus(); // Fetch status when tab is opened
+              }
+            } else {
+              p.classList.add("hidden");
+            }
+          });
         };
       });
 
       /* ---------- TTS ---------- */
-      el("#ttsSend").onclick = async () => {
-        const txtInput = el("#ttsInput");
-        const txt = txtInput.value.trim();
+      const ttsInput = el("#ttsInput");
+      const ttsSendBtn = el("#ttsSend");
+      const ttsFeed = "#ttsFeed";
+
+      ttsSendBtn.onclick = async () => {
+        const txt = ttsInput.value.trim();
         if (!txt) return;
-        appendBubble("#ttsFeed", txt, "user");
-        txtInput.value = "";
-        txtInput.focus(); // Keep focus on input
-        try {
-          const r = await fetch("/api/tts", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text: txt }),
-          });
-          const j = await r.json();
-          if (r.ok) appendBubble("#ttsFeed", j.message, "bot", j.audio_url);
-          else
-            appendBubble(
-              "#ttsFeed",
-              `Error: ${j.error || r.statusText}`,
-              "bot"
-            );
-        } catch (error) {
-          appendBubble("#ttsFeed", `Network Error: ${error.message}`, "bot");
+        appendBubble(ttsFeed, txt, "user");
+        ttsInput.value = "";
+        ttsInput.focus();
+        ttsSendBtn.disabled = true; // Disable button during request
+
+        const result = await apiCall("/api/tts", "POST", { text: txt });
+
+        if (result && result.message) {
+          // Check for message specifically
+          appendBubble(ttsFeed, result.message, "bot", result.audio_url);
+        } else {
+          appendBubble(
+            ttsFeed,
+            `Error: ${result.error || "Unknown TTS error"}`,
+            "bot"
+          );
         }
+        ttsSendBtn.disabled = false; // Re-enable button
       };
-      el("#ttsClear").onclick = () => feedClear("#ttsFeed");
-      el("#ttsInput").addEventListener("keypress", (e) => {
+      el("#ttsClear").onclick = () => feedClear(ttsFeed);
+      ttsInput.addEventListener("keypress", (e) => {
         if (e.key === "Enter" && !e.shiftKey) {
-          e.preventDefault(); // Prevent new line
-          el("#ttsSend").click(); // Trigger send
+          e.preventDefault();
+          ttsSendBtn.click();
         }
       });
 
       /* ---------- Agent ---------- */
-      el("#agentSend").onclick = async () => {
-        const agentInput = el("#agentInput");
+      const agentInput = el("#agentInput");
+      const agentSendBtn = el("#agentSend");
+      const agentFeed = "#agentFeed";
+
+      agentSendBtn.onclick = async () => {
         const q = agentInput.value.trim();
         if (!q) return;
-        appendBubble("#agentFeed", q, "user");
+        appendBubble(agentFeed, q, "user");
         agentInput.value = "";
         agentInput.focus();
-        try {
-          const r = await fetch("/api/agent", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ query: q }),
-          });
-          const j = await r.json();
-          if (r.ok) appendBubble("#agentFeed", j.message, "bot", j.audio_url);
-          else
-            appendBubble(
-              "#agentFeed",
-              `Error: ${j.error || r.statusText}`,
-              "bot"
-            );
-        } catch (error) {
-          appendBubble("#agentFeed", `Network Error: ${error.message}`, "bot");
+        agentSendBtn.disabled = true;
+
+        const result = await apiCall("/api/agent", "POST", { query: q });
+
+        if (result && result.message) {
+          appendBubble(agentFeed, result.message, "bot", result.audio_url);
+        } else {
+          appendBubble(
+            agentFeed,
+            `Error: ${result.error || "Unknown Agent error"}`,
+            "bot"
+          );
         }
+        agentSendBtn.disabled = false;
       };
-      el("#agentClear").onclick = () => feedClear("#agentFeed");
-      el("#agentInput").addEventListener("keypress", (e) => {
+      el("#agentClear").onclick = () => feedClear(agentFeed);
+      agentInput.addEventListener("keypress", (e) => {
         if (e.key === "Enter" && !e.shiftKey) {
           e.preventDefault();
-          el("#agentSend").click();
+          agentSendBtn.click();
         }
       });
 
       /* ---------- Realtime ---------- */
-      const rtStatusEl = el("#realtimeStatus"); // Cache status element selector
+      const rtStatusEl = el("#realtimeStatus");
       const startBtn = el("#startTalking");
       const stopBtn = el("#stopTalking");
+      const rtTextInput = el("#realtimeText");
+      const rtTextSendBtn = el("#realtimeTextSend");
+      const realtimeFeed = "#realtimeFeed";
 
-      startBtn.onclick = () => {
-        socket.emit("start_talking");
-        startBtn.disabled = true;
-        stopBtn.disabled = false;
-        if (rtStatusEl) rtStatusEl.textContent = "Recording…"; // Update status text directly
-      };
-      stopBtn.onclick = () => {
-        socket.emit("stop_talking");
-        stopBtn.disabled = true;
-        // Don't re-enable start immediately, wait for status update maybe
-        if (rtStatusEl) rtStatusEl.textContent = "Processing…";
-      };
+      startBtn.onclick = () => socket.emit("start_talking");
+      stopBtn.onclick = () => socket.emit("stop_talking");
       el("#rtClear").onclick = () =>
-        feedClear("#realtimeFeed", "#realtimeStatus", "Ready"); // Clear feed, reset status
+        feedClear(realtimeFeed, "#realtimeStatus", "Ready");
 
-      el("#realtimeTextSend").onclick = () => {
-        const rtTextInput = el("#realtimeText");
+      rtTextSendBtn.onclick = () => {
         const m = rtTextInput.value.trim();
         if (!m) return;
-        appendBubble("#realtimeFeed", m, "user");
+        appendBubble(realtimeFeed, m, "user");
         rtTextInput.value = "";
         rtTextInput.focus();
         socket.emit("send_text", { text: m });
       };
-      el("#realtimeText").addEventListener("keypress", (e) => {
+      rtTextInput.addEventListener("keypress", (e) => {
         if (e.key === "Enter") {
           e.preventDefault();
-          el("#realtimeTextSend").click();
+          rtTextSendBtn.click();
         }
       });
 
-      // Update status and re-enable start button when ready
       socket.on("status", (d) => {
         if (rtStatusEl) rtStatusEl.textContent = d.message;
-        if (d.message === "Ready" || d.message === "Processing…") {
-          // Or other non-recording states
-          startBtn.disabled = false;
-          stopBtn.disabled = true;
-        } else if (d.message === "Recording…") {
+        // Enable/disable buttons based on status
+        if (d.message === "Recording…") {
           startBtn.disabled = true;
           stopBtn.disabled = false;
+        } else if (d.message === "Ready" || d.message.startsWith("Error:")) {
+          startBtn.disabled = false;
+          stopBtn.disabled = true;
+        } else {
+          // Processing, Connecting, etc.
+          startBtn.disabled = true;
+          stopBtn.disabled = true;
         }
       });
-
       socket.on("broadcast_text", (d) => {
-        appendBubble("#realtimeFeed", d.message, "bot");
-        startBtn.disabled = false; // Re-enable start after bot speaks
+        appendBubble(realtimeFeed, d.message, "bot");
+        // Assume bot speaking means interaction is done, ready for next input
+        if (rtStatusEl) rtStatusEl.textContent = "Ready";
+        startBtn.disabled = false;
         stopBtn.disabled = true;
-        if (rtStatusEl) rtStatusEl.textContent = "Ready"; // Update status
       });
       socket.on("connect", () => {
+        console.log("Realtime Socket Connected");
         if (rtStatusEl) rtStatusEl.textContent = "Connected. Ready.";
         startBtn.disabled = false;
         stopBtn.disabled = true;
       });
       socket.on("disconnect", () => {
-        if (rtStatusEl) rtStatusEl.textContent = "Disconnected.";
+        console.log("Realtime Socket Disconnected");
+        if (rtStatusEl) rtStatusEl.textContent = "Disconnected. Please reload.";
+        startBtn.disabled = true;
+        stopBtn.disabled = true;
+      });
+      socket.on("connect_error", (err) => {
+        console.error("Realtime Socket Connection Error:", err);
+        if (rtStatusEl)
+          rtStatusEl.textContent = `Connection Error: ${err.message}`;
         startBtn.disabled = true;
         stopBtn.disabled = true;
       });
 
-      /* ---------- PDF: auto‑upload & Q&A ---------- */
-      let currentPDF = null;
-      const pdfStatusEl = el("#pdfUploadStatus"); // Cache status element selector
+      /* ---------- PDF ---------- */
+      let currentPDF = null; // Store filename of the currently active PDF
+      const pdfStatusEl = el("#pdfUploadStatus");
       const pdfQASection = el("#pdfQA");
       const pdfFileInput = el("#pdfFile");
       const pdfQuestionInput = el("#pdfQuestion");
+      const pdfAskBtn = el("#pdfAsk");
+      const pdfFeed = "#pdfFeed";
 
       pdfFileInput.onchange = async () => {
-        const f = pdfFileInput.files[0];
-        if (!f) return;
-        pdfStatusEl.textContent = "Subiendo e indexando… por favor espera";
-        pdfStatusEl.classList.remove("hidden"); // Ensure status visible
-        pdfQASection.classList.add("hidden"); // Hide Q&A while uploading
+        const file = pdfFileInput.files[0];
+        if (!file) return;
+
+        pdfStatusEl.textContent = "⏳ Subiendo e indexando… por favor espera";
+        pdfStatusEl.classList.remove("hidden");
+        pdfQASection.classList.add("hidden");
+        pdfAskBtn.disabled = true; // Disable ask while uploading
         currentPDF = null; // Reset current PDF
 
-        const fd = new FormData();
-        fd.append("file", f);
-        try {
-          const r = await fetch("/api/pdf/upload", {
-            method: "POST",
-            body: fd,
-          });
-          const j = await r.json();
-          if (r.ok) {
-            currentPDF = j.filename;
-            pdfStatusEl.textContent = `✅ PDF listo: ${currentPDF}`;
-            pdfQASection.classList.remove("hidden");
-            pdfQuestionInput.focus();
-          } else {
-            pdfStatusEl.textContent = `⚠️ Error al cargar: ${
-              j.error || r.statusText
-            }`;
-            pdfFileInput.value = ""; // Clear file input on error
-          }
-        } catch (error) {
-          pdfStatusEl.textContent = `⚠️ Network Error: ${error.message}`;
+        const formData = new FormData();
+        formData.append("file", file);
+
+        // Use apiCall helper for consistency
+        const result = await apiCall("/api/pdf/upload", "POST", formData);
+
+        if (result && result.filename) {
+          // Check for filename specifically
+          currentPDF = result.filename;
+          pdfStatusEl.textContent = `✅ PDF listo: ${currentPDF}`;
+          pdfQASection.classList.remove("hidden");
+          pdfAskBtn.disabled = false; // Enable ask button
+          pdfQuestionInput.focus();
+          // Clear previous chat history for the new PDF
+          feedClear(pdfFeed, "#pdfUploadStatus", `✅ PDF listo: ${currentPDF}`);
+        } else {
+          pdfStatusEl.textContent = `⚠️ Error: ${
+            result.error || "Upload failed"
+          }`;
           pdfFileInput.value = ""; // Clear file input on error
         }
       };
 
-      el("#pdfAsk").onclick = async () => {
+      pdfAskBtn.onclick = async () => {
         const q = pdfQuestionInput.value.trim();
-        if (!q || !currentPDF) return;
-        appendBubble("#pdfFeed", q, "user");
+        if (!q || !currentPDF) {
+          showToast(
+            "Please enter a question and make sure a PDF is uploaded.",
+            "warning"
+          );
+          return;
+        }
+        appendBubble(pdfFeed, q, "user");
         pdfQuestionInput.value = "";
         pdfQuestionInput.focus();
-        try {
-          const r = await fetch("/api/pdf/ask", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ question: q, filename: currentPDF }),
-          });
-          const j = await r.json();
-          if (r.ok) appendBubble("#pdfFeed", j.answer, "bot", j.audio_url);
-          else
-            appendBubble(
-              "#pdfFeed",
-              `Error: ${j.error || r.statusText}`,
-              "bot"
-            );
-        } catch (error) {
-          appendBubble("#pdfFeed", `Network Error: ${error.message}`, "bot");
+        pdfAskBtn.disabled = true; // Disable during request
+
+        const result = await apiCall("/api/pdf/ask", "POST", {
+          question: q,
+          filename: currentPDF, // Send the current filename
+        });
+
+        if (result && result.answer) {
+          appendBubble(pdfFeed, result.answer, "bot", result.audio_url);
+        } else {
+          appendBubble(
+            pdfFeed,
+            `Error: ${result.error || "Could not get answer"}`,
+            "bot"
+          );
         }
+        pdfAskBtn.disabled = false; // Re-enable button
       };
       pdfQuestionInput.addEventListener("keypress", (e) => {
         if (e.key === "Enter") {
           e.preventDefault();
-          el("#pdfAsk").click();
+          pdfAskBtn.click();
         }
       });
 
-      el("#pdfClear").onclick = () =>
-        feedClear(
-          "#pdfFeed",
-          "#pdfUploadStatus",
-          `PDF listo: ${currentPDF || "Ninguno cargado"}`
-        ); // Clear feed, maintain status
+      el("#pdfClear").onclick = () => {
+        // Clear feed but keep the status of the currently loaded PDF
+        const statusText = currentPDF
+          ? `✅ PDF listo: ${currentPDF}`
+          : "Elige un PDF para cargar…";
+        feedClear(pdfFeed, "#pdfUploadStatus", statusText);
+      };
 
-      // Set initial state for Realtime on load
+      /* ---------- Bluetooth ---------- */
+      const btToggle = el("#btToggle");
+      const btStatusText = el("#btStatusText");
+      const btPowered = el("#btPowered");
+      const btDiscoverable = el("#btDiscoverable");
+      const btPairable = el("#btPairable");
+      const btError = el("#btError");
+      const btRefreshBtn = el("#btRefreshStatus");
+
+      async function refreshBluetoothStatus() {
+        btStatusText.textContent = "Fetching...";
+        btPowered.textContent = "...";
+        btDiscoverable.textContent = "...";
+        btPairable.textContent = "...";
+        btError.textContent = "";
+        btToggle.disabled = true; // Disable toggle while fetching
+        btRefreshBtn.disabled = true;
+
+        const result = await apiCall("/api/bluetooth/status", "GET");
+
+        if (result && result.error === null) {
+          // Check if error is explicitly null or undefined
+          btStatusText.textContent = "OK";
+          btPowered.textContent = result.powered ? "Yes" : "No";
+          btDiscoverable.textContent = result.discoverable ? "Yes" : "No";
+          btPairable.textContent = result.pairable ? "Yes" : "No";
+          // Update the toggle state based on discoverable AND pairable status
+          // Consider them enabled only if both are true
+          btToggle.checked = result.discoverable && result.pairable;
+          btToggle.disabled = false; // Re-enable toggle
+        } else {
+          btStatusText.textContent = "Error";
+          const errorMsg = result.error || "Failed to fetch status";
+          btError.textContent = errorMsg;
+          console.error("Bluetooth status error:", errorMsg);
+          btToggle.disabled = true; // Keep disabled on error
+          showToast(`Bluetooth Status Error: ${errorMsg}`, "error");
+        }
+        btRefreshBtn.disabled = false; // Re-enable refresh button
+      }
+
+      btToggle.onchange = async () => {
+        const enable = btToggle.checked;
+        btToggle.disabled = true; // Disable during API call
+        btStatusText.textContent = enable ? "Enabling..." : "Disabling...";
+
+        // Call both discoverable and pairable endpoints
+        const payload = { enable: enable };
+        const discoverableResult = await apiCall(
+          "/api/bluetooth/discoverable",
+          "POST",
+          payload
+        );
+        const pairableResult = await apiCall(
+          "/api/bluetooth/pairable",
+          "POST",
+          payload
+        );
+
+        // Check results and update status/UI
+        if (discoverableResult.success && pairableResult.success) {
+          showToast(
+            `Bluetooth ${enable ? "enabled" : "disabled"} successfully`,
+            "success"
+          );
+          // Refresh status after a short delay to allow system changes
+          setTimeout(refreshBluetoothStatus, 1500);
+        } else {
+          const errMsg = `Discoverable: ${
+            discoverableResult.message || discoverableResult.error
+          }. Pairable: ${pairableResult.message || pairableResult.error}`;
+          showToast(`Bluetooth update failed: ${errMsg}`, "error");
+          btError.textContent = `Update failed: ${errMsg}`;
+          // Revert toggle state on failure and refresh status immediately
+          btToggle.checked = !enable; // Revert UI
+          refreshBluetoothStatus(); // Get actual current state
+        }
+        // Re-enable is handled by refreshBluetoothStatus
+      };
+
+      btRefreshBtn.onclick = refreshBluetoothStatus;
+
+      // --- Initial Setup ---
       document.addEventListener("DOMContentLoaded", () => {
+        console.log("DOM Content Loaded");
+        // Set initial state for Realtime on load
         if (rtStatusEl) rtStatusEl.textContent = "Connecting...";
-        // Ensure correct initial button state for realtime
-        startBtn.disabled = true; // Disable until connected
+        startBtn.disabled = true; // Disable until socket connects
         stopBtn.disabled = true;
+
+        // Set initial state for PDF
+        pdfQASection.classList.add("hidden");
+        pdfAskBtn.disabled = true;
+
+        // Initial Bluetooth status check (optional, might do it on tab click)
+        // refreshBluetoothStatus(); // Or call this when BT tab is first clicked
       });
     </script>
   </body>
