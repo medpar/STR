@@ -4,7 +4,7 @@
 #!/usr/bin/env python3
 """
 Flask / Flask‑SocketIO server for STR, now with PDF concepts & questions,
-chat UI, and Bluetooth control.
+chat UI, and Bluetooth control using combined commands.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from agents import process_query
 from tts import generate_tts
 from realtime import RealtimeClient, INSTRUCTIONS
 from files import PDFManager
-from config import MIC_DEVICE_INDEX, VECTOR_STORE_ID # Removed duplicate MIC_DEVICE_INDEX
+from config import MIC_DEVICE_INDEX, VECTOR_STORE_ID
 # Import Bluetooth functions
 import bluetooth as bt # Renamed to avoid conflict with standard library
 
@@ -46,15 +46,12 @@ ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 VOICE_ID = os.getenv("VOICE_ID")
 MODEL_ID = os.getenv("MODEL_ID")
 if not all([ELEVENLABS_API_KEY, VOICE_ID, MODEL_ID]):
-    # Use logging instead of raising immediately for potentially optional features
     logging.warning("Missing ElevenLabs API Key, Voice ID, or Model ID. TTS features might be limited.")
-    # Or raise RuntimeError("Missing ELEVENLABS_API_KEY, VOICE_ID, MODEL_ID") if critical
 
 # ------------------------------------------------------------------
 # Flask App and Extensions Initialization
 # ------------------------------------------------------------------
 app = Flask(__name__)
-# Secret key is needed for sessions, flash messages, etc. Good practice even if not used directly yet.
 app.config['SECRET_KEY'] = os.getenv('FLASK_SECRET_KEY', 'default-secret-key-please-change')
 socketio = SocketIO(app, cors_allowed_origins="*")
 
@@ -65,13 +62,12 @@ try:
     eleven_client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
 except Exception as e:
     logging.error("Failed to initialize ElevenLabs client: %s", e)
-    eleven_client = None # Allow app to run without ElevenLabs if init fails
+    eleven_client = None
 
 try:
-    openai_client = OpenAI() # Assumes OPENAI_API_KEY is set in env
+    openai_client = OpenAI()
 except Exception as e:
     logging.error("Failed to initialize OpenAI client: %s", e)
-    # Decide if this is critical
     raise RuntimeError(f"Failed to initialize OpenAI client: {e}") from e
 
 pdf_manager = PDFManager(UPLOAD_DIR, VECTOR_STORE_ID)
@@ -87,14 +83,13 @@ def _broadcast(msg: str):
 try:
     realtime_client = RealtimeClient(
         instructions=INSTRUCTIONS,
-        voice="ash", # Consider making this configurable
+        voice="ash",
         mic_index=MIC_DEVICE_INDEX,
         on_text=_broadcast,
     )
 except Exception as e:
     logging.error("Failed to initialize RealtimeClient: %s", e)
-    # Decide how to handle this - maybe disable realtime tab?
-    realtime_client = None # Allow app to run but realtime might fail
+    realtime_client = None
 
 
 # ------------------------------------------------------------------
@@ -108,6 +103,9 @@ def index():
 @app.route("/audio_files/<path:filename>")
 def serve_audio(filename):
     """Serve generated audio files."""
+    # Use safe_join to prevent path traversal issues, although send_from_directory handles it
+    # safe_path = safe_join(AUDIO_DIR, filename) # Requires import safe_join from werkzeug.utils
+    # Be cautious if filenames could contain '..'
     return send_from_directory(AUDIO_DIR, filename)
 
 # ------------------------------------------------------------------#
@@ -124,8 +122,12 @@ def tts_endpoint():
         return jsonify({"error": "No text provided"}), 400
     try:
         res = generate_tts(text, eleven_client, VOICE_ID, MODEL_ID, AUDIO_DIR)
-        audio_url = f"/audio_files/{os.path.basename(res['mp3_filename'])}" # Use basename for safety
-        return jsonify({"message": res["message"], "audio_url": audio_url})
+        # Ensure filename does not contain path characters
+        safe_filename = os.path.basename(res.get('mp3_filename', ''))
+        if not safe_filename:
+             raise ValueError("Invalid filename received from TTS generation")
+        audio_url = f"/audio_files/{safe_filename}"
+        return jsonify({"message": res.get("message", text), "audio_url": audio_url})
     except Exception as e:
         logging.exception("TTS generation failed")
         return jsonify({"error": f"TTS generation failed: {e}"}), 500
@@ -136,11 +138,6 @@ def tts_endpoint():
 @app.route("/api/agent", methods=["POST"])
 def agent_endpoint():
     """Process query with agent and generate TTS for the answer."""
-    if not eleven_client:
-        # Decide if agent should work without TTS
-        # return jsonify({"error": "TTS service not available, cannot process agent request"}), 503
-        pass # Allow agent to process, but response won't have audio
-
     query = (request.get_json(silent=True) or {}).get("query", "").strip()
     if not query:
         return jsonify({"error": "No query provided"}), 400
@@ -151,16 +148,15 @@ def agent_endpoint():
         logging.exception("Agent query processing failed")
         return jsonify({"error": f"Agent processing failed: {e}"}), 500
 
-    # Generate TTS only if ElevenLabs client is available
     audio_url = None
     if eleven_client:
         try:
             res = generate_tts(answer, eleven_client, VOICE_ID, MODEL_ID, AUDIO_DIR)
-            audio_url = f"/audio_files/{os.path.basename(res['mp3_filename'])}"
+            safe_filename = os.path.basename(res.get('mp3_filename', ''))
+            if safe_filename:
+                 audio_url = f"/audio_files/{safe_filename}"
         except Exception as e:
             logging.exception("TTS generation failed for agent response")
-            # Don't fail the whole request, just return without audio
-            # Fallthrough intentional
     else:
         logging.warning("ElevenLabs client not available, skipping TTS for agent response.")
 
@@ -177,7 +173,10 @@ def pdf_upload():
     file = request.files['file']
     if file.filename == '':
         return jsonify({"error": "No selected file"}), 400
-    if not file or not file.filename.lower().endswith(".pdf"):
+    # Secure filename before further processing
+    # filename = secure_filename(file.filename) # Requires import secure_filename
+    # if not filename.lower().endswith(".pdf"):
+    if not file.filename.lower().endswith(".pdf"): # Basic check
          return jsonify({"error": "Invalid file type, only PDF allowed"}), 400
 
     try:
@@ -196,12 +195,9 @@ def pdf_ask():
     """Ask a question about the currently active PDF."""
     data = request.get_json(silent=True) or {}
     question = data.get("question", "").strip()
-    # Use the filename managed by PDFManager if not explicitly passed,
-    # but it's better if frontend sends the filename it knows it uploaded.
-    filename = data.get("filename")
+    filename = data.get("filename") # Frontend should send filename from upload response
 
     if not filename:
-        # Fallback to the manager's current file if frontend doesn't send it
         filename = pdf_manager.get_current_filename()
         if not filename:
             return jsonify({"error": "No PDF file specified or previously uploaded in this session."}), 400
@@ -212,15 +208,15 @@ def pdf_ask():
 
     try:
         answer = pdf_manager.ask(filename, question)
-        # Generate TTS if available
         audio_url = None
         if eleven_client:
             try:
                 res = generate_tts(answer, eleven_client, VOICE_ID, MODEL_ID, AUDIO_DIR)
-                audio_url = f"/audio_files/{os.path.basename(res['mp3_filename'])}"
+                safe_filename = os.path.basename(res.get('mp3_filename', ''))
+                if safe_filename:
+                    audio_url = f"/audio_files/{safe_filename}"
             except Exception as e:
                 logging.exception("TTS generation failed for PDF answer")
-                # Continue without audio if TTS fails
         else:
             logging.warning("ElevenLabs client not available, skipping TTS for PDF answer.")
 
@@ -232,7 +228,6 @@ def pdf_ask():
         logging.exception("PDF ask error")
         return jsonify({"error": f"An unexpected error occurred while asking: {exc}"}), 500
 
-# Simplified concepts/questions using the same structure as ask
 @app.route("/api/pdf/concepts", methods=["POST"])
 def pdf_concepts():
     """Get key concepts from the specified PDF."""
@@ -276,38 +271,40 @@ def pdf_questions():
 def bluetooth_status():
     """Get current Bluetooth status."""
     status = bt.get_bluetooth_status()
+    # Return 500 if there was an error fetching status
+    if status.get("error"):
+         return jsonify(status), 500
     return jsonify(status)
 
-@app.route("/api/bluetooth/discoverable", methods=["POST"])
-def bluetooth_discoverable():
-    """Set Bluetooth discoverable state."""
+# NEW Endpoint to set both discoverable and pairable states
+@app.route("/api/bluetooth/set_mode", methods=["POST"])
+def bluetooth_set_mode():
+    """Set Bluetooth discoverable AND pairable state together."""
     data = request.get_json(silent=True) or {}
     enable = data.get("enable", False) # Default to disabling
-    duration = data.get("duration", 180) # Default duration
+    duration = data.get("duration", 180) # Default duration if enabling
+
+    # Validate enable is a boolean
+    if not isinstance(enable, bool):
+         return jsonify({"success": False, "message": "Invalid 'enable' parameter, must be true or false."}), 400
+
     try:
-        success, message = bt.set_discoverable(enable, duration)
+        success, message = bt.set_discoverable_pairable(enable, duration)
         if success:
             return jsonify({"success": True, "message": message})
         else:
+            # Use 500 for server-side/command errors, 400 for bad input (handled above)
             return jsonify({"success": False, "message": message}), 500
     except Exception as e:
-        logging.exception("Error setting discoverable state")
+        logging.exception("Error setting Bluetooth discoverable/pairable state")
         return jsonify({"success": False, "message": f"Server error: {e}"}), 500
 
-@app.route("/api/bluetooth/pairable", methods=["POST"])
-def bluetooth_pairable():
-    """Set Bluetooth pairable state."""
-    data = request.get_json(silent=True) or {}
-    enable = data.get("enable", False) # Default to disabling
-    try:
-        success, message = bt.set_pairable(enable)
-        if success:
-            return jsonify({"success": True, "message": message})
-        else:
-            return jsonify({"success": False, "message": message}), 500
-    except Exception as e:
-        logging.exception("Error setting pairable state")
-        return jsonify({"success": False, "message": f"Server error: {e}"}), 500
+# Remove or comment out old separate endpoints if no longer used
+# @app.route("/api/bluetooth/discoverable", methods=["POST"])
+# def bluetooth_discoverable(): ...
+
+# @app.route("/api/bluetooth/pairable", methods=["POST"])
+# def bluetooth_pairable(): ...
 
 
 # ------------------------------------------------------------------#
@@ -316,7 +313,7 @@ def bluetooth_pairable():
 @socketio.on("connect", namespace="/realtime")
 def rt_connect():
     """Handle client connection to realtime namespace."""
-    logging.info("Client connected to /realtime namespace")
+    logging.info("Client connected to /realtime namespace (sid: %s)", request.sid)
     if realtime_client:
         emit("status", {"message": "Ready"})
     else:
@@ -326,14 +323,15 @@ def rt_connect():
 @socketio.on("disconnect", namespace="/realtime")
 def rt_disconnect():
     """Handle client disconnection."""
-    logging.info("Client disconnected from /realtime namespace")
-    # Optional: Add any cleanup if needed when a client disconnects
+    logging.info("Client disconnected from /realtime namespace (sid: %s)", request.sid)
+
 
 @socketio.on("start_talking", namespace="/realtime")
 def rt_start():
     """Start audio streaming to Realtime API."""
     if realtime_client:
         try:
+            logging.info("rt_start: Requesting start talking (sid: %s)", request.sid)
             realtime_client.start_talking()
             emit("status", {"message": "Recording…"})
         except Exception as e:
@@ -348,8 +346,9 @@ def rt_stop():
     """Stop audio streaming."""
     if realtime_client:
         try:
+            logging.info("rt_stop: Requesting stop talking (sid: %s)", request.sid)
             realtime_client.stop_talking()
-            emit("status", {"message": "Processing…"}) # Status indicates processing starts
+            emit("status", {"message": "Processing…"})
         except Exception as e:
             logging.exception("Error stopping realtime talking")
             emit("status", {"message": f"Error: {e}"})
@@ -363,10 +362,8 @@ def rt_send_text(data):
     text = (data or {}).get("text", "").strip()
     if text and realtime_client:
         try:
-            logging.info("Sending text to realtime: %s", text)
+            logging.info("rt_send_text: Sending text to realtime: '%s' (sid: %s)", text, request.sid)
             realtime_client.send_text(text)
-            # Optionally emit a status or confirmation
-            # emit("status", {"message": "Text sent..."})
         except Exception as e:
             logging.exception("Error sending text to realtime")
             emit("status", {"message": f"Error sending text: {e}"})
@@ -380,8 +377,10 @@ def rt_send_text(data):
 if __name__ == "__main__":
     host = os.getenv("FLASK_HOST", "0.0.0.0")
     port = int(os.getenv("FLASK_PORT", "5000"))
-    debug = os.getenv("FLASK_DEBUG", "True").lower() == "true" # Control debug via env var
+    # Default to debug=False unless explicitly set
+    debug_env = os.getenv("FLASK_DEBUG", "False").lower()
+    run_in_debug_mode = debug_env in ["true", "1", "yes"]
 
-    logging.info(f"Starting Flask app on {host}:{port} (Debug: {debug})")
+    logging.info(f"Starting Flask app on {host}:{port} (Debug: {run_in_debug_mode})")
     # Use SocketIO's run method which integrates Werkzeug server
-    socketio.run(app, host=host, port=port, debug=debug, use_reloader=debug)
+    socketio.run(app, host=host, port=port, debug=run_in_debug_mode, use_reloader=run_in_debug_mode)

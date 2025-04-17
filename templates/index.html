@@ -11,35 +11,33 @@
       .chat-container {
         display: flex;
         flex-direction: column;
-        /* Height calculation: screen height minus approx header/tabs/padding */
-        height: calc(100vh - 200px); /* START ADJUSTING THIS VALUE */
-        max-height: 70vh; /* Absolute max height */
-        min-height: 300px; /* Minimum sensible height */
+        height: calc(100vh - 200px); /* Adjust as needed */
+        max-height: 70vh;
+        min-height: 300px;
       }
       .chat-history {
-        flex-grow: 1; /* Takes available space */
-        overflow-y: auto; /* Enables scrolling */
-        padding: 1rem 1.5rem; /* More horizontal padding */
+        flex-grow: 1;
+        overflow-y: auto;
+        padding: 1rem 1.5rem;
         display: flex;
         flex-direction: column;
-        gap: 0.8rem; /* Space between bubbles */
-        background-color: #f9fafb; /* Slightly off-white background for chat area */
+        gap: 0.8rem;
+        background-color: #f9fafb;
       }
       .chat-input-area {
-        padding: 1rem 1.5rem; /* Match history padding */
-        border-top: 1px solid #e5e7eb; /* Separator line */
-        background-color: #ffffff; /* White background for input */
-        flex-shrink: 0; /* Prevent input area from shrinking */
+        padding: 1rem 1.5rem;
+        border-top: 1px solid #e5e7eb;
+        background-color: #ffffff;
+        flex-shrink: 0;
       }
       .input-box {
-        /* General style for text inputs/areas */
-        padding: 0.6rem 1rem; /* Slightly reduced padding */
+        padding: 0.6rem 1rem;
         border: 1px solid #d1d5db;
         border-radius: 0.375rem;
-        flex-grow: 1; /* Input takes available width */
+        flex-grow: 1;
         outline: none;
         transition: border-color 0.2s ease;
-        resize: none; /* Disable textarea resizing handle */
+        resize: none;
       }
       .input-box:focus {
         border-color: #2563eb;
@@ -47,33 +45,32 @@
       }
       .bubble {
         padding: 0.75rem 1rem;
-        border-radius: 0.75rem; /* Slightly more rounded */
-        max-width: 85%; /* Allow slightly wider bubbles */
-        word-wrap: break-word; /* Prevent long words from overflowing */
-        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05); /* Subtle shadow */
-        line-height: 1.5; /* Improve readability */
+        border-radius: 0.75rem;
+        max-width: 85%;
+        word-wrap: break-word;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+        line-height: 1.5;
       }
       .user {
-        background-color: #dbeafe; /* Lighter blue */
-        color: #1e3a8a; /* Darker blue text */
+        background-color: #dbeafe;
+        color: #1e3a8a;
         align-self: flex-end;
-        border-bottom-right-radius: 0.25rem; /* Tail effect */
-        margin-left: auto; /* Push to right */
+        border-bottom-right-radius: 0.25rem;
+        margin-left: auto;
       }
       .bot {
-        background-color: #e5e7eb; /* Lighter gray */
+        background-color: #e5e7eb;
         color: #1f2937;
         align-self: flex-start;
-        border-bottom-left-radius: 0.25rem; /* Tail effect */
-        margin-right: auto; /* Push to left */
+        border-bottom-left-radius: 0.25rem;
+        margin-right: auto;
       }
       /* Buttons */
       .btn {
-        /* Base button style */
-        padding: 0.5rem 1.1rem; /* Adjusted padding */
+        padding: 0.5rem 1.1rem;
         border-radius: 0.375rem;
         font-weight: 500;
-        white-space: nowrap; /* Prevent button text wrapping */
+        white-space: nowrap;
         transition: background-color 0.2s ease, box-shadow 0.2s ease;
         cursor: pointer;
         display: inline-flex;
@@ -82,14 +79,14 @@
       }
       .btn:focus {
         outline: none;
-        box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.5); /* Focus ring */
+        box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.5);
       }
       .btn-primary {
-        background-color: #2563eb; /* Tailwind blue-600 */
+        background-color: #2563eb;
         color: white;
       }
       .btn-primary:hover {
-        background-color: #1d4ed8; /* Darker blue */
+        background-color: #1d4ed8;
       }
       .btn-primary:disabled {
         background-color: #9ca3af;
@@ -97,11 +94,11 @@
         opacity: 0.7;
       }
       .btn-secondary {
-        background-color: #6b7280; /* Gray-500 */
+        background-color: #6b7280;
         color: white;
       }
       .btn-secondary:hover {
-        background-color: #4b5563; /* Darker gray */
+        background-color: #4b5563;
       }
       .btn-secondary:disabled {
         background-color: #9ca3af;
@@ -110,29 +107,29 @@
       }
       audio {
         width: 100%;
-        margin-top: 0.75rem; /* More space above audio player */
-        display: block; /* Ensure it takes full width */
-        height: 40px; /* Standard height */
+        margin-top: 0.75rem;
+        display: block;
+        height: 40px;
       }
       /* Tab styling */
       .tab {
-        padding: 0.75rem 1.25rem; /* Slightly larger tabs */
-        border-bottom: 3px solid transparent; /* Thicker underline */
-        color: #4b5563; /* Default tab color (gray-600) */
+        padding: 0.75rem 1.25rem;
+        border-bottom: 3px solid transparent;
+        color: #4b5563;
         font-weight: 500;
         transition: all 0.2s ease;
         text-align: center;
       }
       .tab:hover {
-        color: #1d4ed8; /* Darker blue on hover */
-        background-color: #eff6ff; /* Light blue background on hover */
+        color: #1d4ed8;
+        background-color: #eff6ff;
       }
       .tab.active {
-        border-color: #2563eb; /* Blue underline for active */
-        color: #1e40af; /* Darker blue text for active */
+        border-color: #2563eb;
+        color: #1e40af;
         font-weight: 600;
       }
-      /* Hide scrollbar for cleaner look (optional) */
+      /* Hide scrollbar */
       .chat-history::-webkit-scrollbar {
         display: none;
       }
@@ -140,17 +137,16 @@
         -ms-overflow-style: none;
         scrollbar-width: none;
       }
-
-      /* Status message styling */
+      /* Status message */
       .status-message {
         text-align: center;
-        font-size: 0.875rem; /* text-sm */
-        color: #6b7280; /* gray-500 */
+        font-size: 0.875rem;
+        color: #6b7280;
         padding: 0.5rem 1rem;
-        background-color: #f3f4f6; /* gray-100 */
-        border-radius: 9999px; /* rounded-full */
-        align-self: center; /* Center horizontally */
-        margin: 0.5rem auto; /* Add some margin */
+        background-color: #f3f4f6;
+        border-radius: 9999px;
+        align-self: center;
+        margin: 0.5rem auto;
       }
       /* Bluetooth Switch Styling */
       .switch {
@@ -158,6 +154,7 @@
         display: inline-block;
         width: 50px;
         height: 24px;
+        flex-shrink: 0;
       }
       .switch input {
         opacity: 0;
@@ -189,18 +186,18 @@
       input:checked + .slider {
         background-color: #2563eb;
       }
+      input:focus + .slider {
+        box-shadow: 0 0 1px #2563eb;
+      }
       input:checked + .slider:before {
         transform: translateX(26px);
       }
     </style>
   </head>
   <body class="bg-gray-100 text-gray-900 font-sans antialiased">
-    <!-- Added antialiased -->
     <div
       class="max-w-4xl mx-auto py-6 px-4 sm:px-6 lg:px-8 flex flex-col gap-5"
     >
-      <!-- Increased max-width slightly -->
-      <!-- Title -->
       <h1 class="text-3xl font-bold text-center text-gray-800 tracking-tight">
         📡 Proyecto STR
       </h1>
@@ -212,13 +209,10 @@
         <button data-tab="realtime" class="tab">Realtime</button>
         <button data-tab="pdf" class="tab">PDF</button>
         <button data-tab="bluetooth" class="tab">Bluetooth</button>
-        <!-- New Tab -->
       </nav>
 
       <!-- Panels Container -->
       <div class="bg-white rounded-lg shadow-lg overflow-hidden">
-        <!-- Increased shadow -->
-
         <!-- ------------ TTS ------------- -->
         <section id="panel-tts" class="panel chat-container">
           <div id="ttsFeed" class="chat-history"></div>
@@ -231,7 +225,6 @@
               placeholder="Escribe texto…"
               rows="1"
             ></textarea>
-            <!-- rows="1" for shorter initial height -->
             <div class="flex gap-2 flex-shrink-0">
               <button id="ttsSend" class="btn btn-primary">Enviar</button>
               <button id="ttsClear" class="btn btn-secondary">Limpiar</button>
@@ -251,7 +244,6 @@
               placeholder="Pregunta…"
               rows="1"
             ></textarea>
-            <!-- rows="1" -->
             <div class="flex gap-2 flex-shrink-0">
               <button id="agentSend" class="btn btn-primary">Enviar</button>
               <button id="agentClear" class="btn btn-secondary">Limpiar</button>
@@ -269,7 +261,6 @@
               <button id="startTalking" class="btn btn-primary">
                 🎙️ Start
               </button>
-              <!-- Added nbsp -->
               <button id="stopTalking" class="btn btn-secondary" disabled>
                 ⏹️ Stop
               </button>
@@ -329,10 +320,10 @@
         >
           <h2 class="text-xl font-semibold text-gray-700">Control Bluetooth</h2>
           <div
-            class="flex items-center gap-4 p-4 border border-gray-200 rounded-lg bg-gray-50 w-full max-w-md"
+            class="flex items-center justify-between gap-4 p-4 border border-gray-200 rounded-lg bg-gray-50 w-full max-w-md"
           >
             <span class="font-medium text-gray-600"
-              >Enable Discoverability & Pairing:</span
+              >Enable Discoverable & Pairing:</span
             >
             <label class="switch">
               <input type="checkbox" id="btToggle" />
@@ -347,14 +338,24 @@
               <strong>Status:</strong>
               <span id="btStatusText">Fetching...</span>
             </p>
-            <p><strong>Powered:</strong> <span id="btPowered">...</span></p>
+            <p>
+              <strong>Powered:</strong>
+              <span id="btPowered" class="font-medium">...</span>
+            </p>
             <p>
               <strong>Discoverable:</strong>
-              <span id="btDiscoverable">...</span>
+              <span id="btDiscoverable" class="font-medium">...</span>
             </p>
-            <p><strong>Pairable:</strong> <span id="btPairable">...</span></p>
-            <p id="btError" class="text-red-600 mt-1"></p>
+            <p>
+              <strong>Pairable:</strong>
+              <span id="btPairable" class="font-medium">...</span>
+            </p>
+            <p id="btError" class="text-red-600 mt-1 font-semibold"></p>
           </div>
+          <p class="text-xs text-gray-500 max-w-md text-center mt-2">
+            Note: System configuration (e.g., /etc/bluetooth/main.conf) might
+            override runtime settings.
+          </p>
           <button id="btRefreshStatus" class="btn btn-secondary mt-2">
             Refresh Status
           </button>
@@ -364,15 +365,27 @@
     </div>
 
     <script>
-      const socket = io("/realtime", { transports: ["websocket"] }); // Force websocket if needed
+      const socket = io("/realtime", { transports: ["websocket"] });
       const el = (sel) => document.querySelector(sel);
       const elAll = (sel) => document.querySelectorAll(sel);
 
       // --- Helper Functions ---
       function showToast(message, type = "info") {
-        // Basic toast notification (implement a library later if needed)
+        // Replace with a proper toast library if needed
         console.log(`TOAST (${type}): ${message}`);
-        // You could add a simple div temporarily appearing on screen here
+        const toast = document.createElement("div");
+        toast.textContent = message;
+        toast.className = `fixed bottom-5 right-5 p-3 rounded-lg shadow-md text-white ${
+          type === "error"
+            ? "bg-red-500"
+            : type === "success"
+            ? "bg-green-500"
+            : "bg-blue-500"
+        }`;
+        document.body.appendChild(toast);
+        setTimeout(() => {
+          toast.remove();
+        }, 3000);
       }
 
       const feedClear = (feedSel, statusSel = null, initialMsg = "") => {
@@ -382,13 +395,16 @@
         if (statusSel) {
           const statusElement = el(statusSel);
           if (statusElement) {
-            // If status is inside the feed, re-create it
             if (feed.contains(statusElement)) {
+              // Check if status is INSIDE feed
               const p = document.createElement("p");
-              p.id = statusElement.id; // Keep the ID
+              p.id = statusElement.id;
               p.className = "status-message"; // Use consistent class
               p.textContent = initialMsg;
               feed.appendChild(p);
+            } else {
+              // Status is OUTSIDE feed
+              statusElement.textContent = initialMsg;
             }
           }
         }
@@ -397,8 +413,6 @@
       function appendBubble(feedSel, text, who, audioUrl = null) {
         const feed = el(feedSel);
         if (!feed) return;
-
-        // Remove any initial status message placeholder inside the feed
         const statusMsg = feed.querySelector(".status-message");
         if (
           statusMsg &&
@@ -407,22 +421,18 @@
         ) {
           statusMsg.remove();
         }
-
         const bubbleDiv = document.createElement("div");
         bubbleDiv.className = `bubble ${who}`;
-
         const textNode = document.createElement("p");
-        textNode.textContent = text; // Use textContent for safety against XSS
+        textNode.textContent = text;
         bubbleDiv.appendChild(textNode);
-
         if (audioUrl) {
           try {
             const audio = document.createElement("audio");
             audio.controls = true;
-            // Preload metadata to potentially get duration faster, etc.
             audio.preload = "metadata";
             audio.src = audioUrl;
-            audio.className = "mt-2 w-full"; // Add margin top
+            audio.className = "mt-2 w-full";
             bubbleDiv.appendChild(audio);
           } catch (e) {
             console.error("Error creating audio element:", e);
@@ -433,9 +443,6 @@
           }
         }
         feed.appendChild(bubbleDiv);
-
-        // Scroll to the bottom smoothly
-        // Use requestAnimationFrame for potentially smoother scroll on rapid updates
         requestAnimationFrame(() => {
           feed.scrollTo({ top: feed.scrollHeight, behavior: "smooth" });
         });
@@ -443,36 +450,41 @@
 
       async function apiCall(endpoint, method = "POST", body = null) {
         try {
-          const options = {
-            method: method,
-            headers: {},
-          };
+          const options = { method: method, headers: {} };
           if (body) {
             if (body instanceof FormData) {
               // Let browser set Content-Type for FormData
+              options.body = body;
             } else {
               options.headers["Content-Type"] = "application/json";
               options.body = JSON.stringify(body);
             }
           }
-          if (body && !(body instanceof FormData)) {
-            options.body = JSON.stringify(body);
-          } else if (body instanceof FormData) {
-            options.body = body; // Assign FormData directly
-          }
-
           const response = await fetch(endpoint, options);
-          const data = await response.json(); // Assume JSON response
-
-          if (!response.ok) {
-            throw new Error(
-              data.error || data.message || `HTTP error ${response.status}`
-            );
+          // Try parsing JSON, but handle potential non-JSON error responses
+          let data;
+          const contentType = response.headers.get("content-type");
+          if (contentType && contentType.indexOf("application/json") !== -1) {
+            data = await response.json();
+          } else {
+            // Handle plain text or other error types
+            const text = await response.text();
+            data = {
+              success: response.ok,
+              error: text || `HTTP error ${response.status}`,
+            };
           }
-          return data; // Contains success: true/false and message/data
+
+          // Add success based on HTTP status if not present in JSON
+          if (typeof data.success === "undefined") {
+            data.success = response.ok;
+          }
+          if (!response.ok && !data.error) {
+            data.error = data.message || `HTTP error ${response.status}`;
+          }
+          return data;
         } catch (error) {
           console.error(`API call to ${endpoint} failed:`, error);
-          // Return an error structure consistent with expected JSON errors
           return { success: false, error: error.message };
         }
       }
@@ -480,26 +492,22 @@
       /* ---------- Tabs ---------- */
       const tabs = elAll("#tabs .tab");
       const panels = elAll(".panel");
-
       tabs.forEach((tab) => {
         tab.onclick = () => {
           tabs.forEach((t) => t.classList.remove("active"));
           tab.classList.add("active");
-
           const targetPanelId = `panel-${tab.dataset.tab}`;
           panels.forEach((p) => {
             if (p.id === targetPanelId) {
               p.classList.remove("hidden");
-              // Scroll chat history to bottom when tab becomes active
               const history = p.querySelector(".chat-history");
               if (history) {
                 requestAnimationFrame(() => {
                   history.scrollTop = history.scrollHeight;
                 });
               }
-              // Special action for Bluetooth tab
               if (tab.dataset.tab === "bluetooth") {
-                refreshBluetoothStatus(); // Fetch status when tab is opened
+                refreshBluetoothStatus();
               }
             } else {
               p.classList.add("hidden");
@@ -512,19 +520,15 @@
       const ttsInput = el("#ttsInput");
       const ttsSendBtn = el("#ttsSend");
       const ttsFeed = "#ttsFeed";
-
       ttsSendBtn.onclick = async () => {
         const txt = ttsInput.value.trim();
         if (!txt) return;
         appendBubble(ttsFeed, txt, "user");
         ttsInput.value = "";
         ttsInput.focus();
-        ttsSendBtn.disabled = true; // Disable button during request
-
+        ttsSendBtn.disabled = true;
         const result = await apiCall("/api/tts", "POST", { text: txt });
-
-        if (result && result.message) {
-          // Check for message specifically
+        if (result && result.success && result.message) {
           appendBubble(ttsFeed, result.message, "bot", result.audio_url);
         } else {
           appendBubble(
@@ -533,7 +537,7 @@
             "bot"
           );
         }
-        ttsSendBtn.disabled = false; // Re-enable button
+        ttsSendBtn.disabled = false;
       };
       el("#ttsClear").onclick = () => feedClear(ttsFeed);
       ttsInput.addEventListener("keypress", (e) => {
@@ -547,7 +551,6 @@
       const agentInput = el("#agentInput");
       const agentSendBtn = el("#agentSend");
       const agentFeed = "#agentFeed";
-
       agentSendBtn.onclick = async () => {
         const q = agentInput.value.trim();
         if (!q) return;
@@ -555,10 +558,8 @@
         agentInput.value = "";
         agentInput.focus();
         agentSendBtn.disabled = true;
-
         const result = await apiCall("/api/agent", "POST", { query: q });
-
-        if (result && result.message) {
+        if (result && result.success && result.message) {
           appendBubble(agentFeed, result.message, "bot", result.audio_url);
         } else {
           appendBubble(
@@ -584,12 +585,10 @@
       const rtTextInput = el("#realtimeText");
       const rtTextSendBtn = el("#realtimeTextSend");
       const realtimeFeed = "#realtimeFeed";
-
       startBtn.onclick = () => socket.emit("start_talking");
       stopBtn.onclick = () => socket.emit("stop_talking");
       el("#rtClear").onclick = () =>
         feedClear(realtimeFeed, "#realtimeStatus", "Ready");
-
       rtTextSendBtn.onclick = () => {
         const m = rtTextInput.value.trim();
         if (!m) return;
@@ -604,10 +603,8 @@
           rtTextSendBtn.click();
         }
       });
-
       socket.on("status", (d) => {
         if (rtStatusEl) rtStatusEl.textContent = d.message;
-        // Enable/disable buttons based on status
         if (d.message === "Recording…") {
           startBtn.disabled = true;
           stopBtn.disabled = false;
@@ -615,14 +612,12 @@
           startBtn.disabled = false;
           stopBtn.disabled = true;
         } else {
-          // Processing, Connecting, etc.
           startBtn.disabled = true;
           stopBtn.disabled = true;
         }
       });
       socket.on("broadcast_text", (d) => {
         appendBubble(realtimeFeed, d.message, "bot");
-        // Assume bot speaking means interaction is done, ready for next input
         if (rtStatusEl) rtStatusEl.textContent = "Ready";
         startBtn.disabled = false;
         stopBtn.disabled = true;
@@ -648,67 +643,54 @@
       });
 
       /* ---------- PDF ---------- */
-      let currentPDF = null; // Store filename of the currently active PDF
+      let currentPDF = null;
       const pdfStatusEl = el("#pdfUploadStatus");
       const pdfQASection = el("#pdfQA");
       const pdfFileInput = el("#pdfFile");
       const pdfQuestionInput = el("#pdfQuestion");
       const pdfAskBtn = el("#pdfAsk");
       const pdfFeed = "#pdfFeed";
-
       pdfFileInput.onchange = async () => {
         const file = pdfFileInput.files[0];
         if (!file) return;
-
-        pdfStatusEl.textContent = "⏳ Subiendo e indexando… por favor espera";
+        pdfStatusEl.textContent = "⏳ Subiendo e indexando…";
         pdfStatusEl.classList.remove("hidden");
         pdfQASection.classList.add("hidden");
-        pdfAskBtn.disabled = true; // Disable ask while uploading
-        currentPDF = null; // Reset current PDF
-
+        pdfAskBtn.disabled = true;
+        currentPDF = null;
         const formData = new FormData();
         formData.append("file", file);
-
-        // Use apiCall helper for consistency
         const result = await apiCall("/api/pdf/upload", "POST", formData);
-
-        if (result && result.filename) {
-          // Check for filename specifically
+        if (result && result.success && result.filename) {
           currentPDF = result.filename;
-          pdfStatusEl.textContent = `✅ PDF listo: ${currentPDF}`;
+          const statusText = `✅ PDF listo: ${currentPDF}`;
+          pdfStatusEl.textContent = statusText;
           pdfQASection.classList.remove("hidden");
-          pdfAskBtn.disabled = false; // Enable ask button
+          pdfAskBtn.disabled = false;
           pdfQuestionInput.focus();
-          // Clear previous chat history for the new PDF
-          feedClear(pdfFeed, "#pdfUploadStatus", `✅ PDF listo: ${currentPDF}`);
+          feedClear(pdfFeed, "#pdfUploadStatus", statusText); // Clear old chat for new PDF
         } else {
           pdfStatusEl.textContent = `⚠️ Error: ${
             result.error || "Upload failed"
           }`;
-          pdfFileInput.value = ""; // Clear file input on error
+          pdfFileInput.value = "";
         }
       };
-
       pdfAskBtn.onclick = async () => {
         const q = pdfQuestionInput.value.trim();
         if (!q || !currentPDF) {
-          showToast(
-            "Please enter a question and make sure a PDF is uploaded.",
-            "warning"
-          );
+          showToast("Please enter question & ensure PDF is loaded.", "warning");
           return;
         }
         appendBubble(pdfFeed, q, "user");
         pdfQuestionInput.value = "";
         pdfQuestionInput.focus();
-        pdfAskBtn.disabled = true; // Disable during request
-
+        pdfAskBtn.disabled = true;
         const result = await apiCall("/api/pdf/ask", "POST", {
           question: q,
-          filename: currentPDF, // Send the current filename
+          filename: currentPDF,
         });
-
-        if (result && result.answer) {
+        if (result && result.success && result.answer) {
           appendBubble(pdfFeed, result.answer, "bot", result.audio_url);
         } else {
           appendBubble(
@@ -717,7 +699,7 @@
             "bot"
           );
         }
-        pdfAskBtn.disabled = false; // Re-enable button
+        pdfAskBtn.disabled = false;
       };
       pdfQuestionInput.addEventListener("keypress", (e) => {
         if (e.key === "Enter") {
@@ -725,9 +707,7 @@
           pdfAskBtn.click();
         }
       });
-
       el("#pdfClear").onclick = () => {
-        // Clear feed but keep the status of the currently loaded PDF
         const statusText = currentPDF
           ? `✅ PDF listo: ${currentPDF}`
           : "Elige un PDF para cargar…";
@@ -743,34 +723,62 @@
       const btError = el("#btError");
       const btRefreshBtn = el("#btRefreshStatus");
 
+      // Function to update UI based on status data
+      function updateBluetoothUI(statusData) {
+        btPowered.textContent =
+          statusData.powered === null
+            ? "N/A"
+            : statusData.powered
+            ? "Yes"
+            : "No";
+        btDiscoverable.textContent =
+          statusData.discoverable === null
+            ? "N/A"
+            : statusData.discoverable
+            ? "Yes"
+            : "No";
+        btPairable.textContent =
+          statusData.pairable === null
+            ? "N/A"
+            : statusData.pairable
+            ? "Yes"
+            : "No";
+
+        // Set toggle state based on *both* being true (or based on powered status if appropriate)
+        const isBtOn =
+          statusData.powered && statusData.discoverable && statusData.pairable;
+        btToggle.checked = isBtOn;
+        btToggle.disabled = statusData.powered === null; // Disable if status is unknown
+
+        if (statusData.error) {
+          btStatusText.textContent = "Error";
+          btError.textContent = statusData.error;
+          btToggle.disabled = true; // Keep disabled on error
+        } else {
+          btStatusText.textContent = "OK";
+          btError.textContent = ""; // Clear previous errors
+        }
+      }
+
       async function refreshBluetoothStatus() {
         btStatusText.textContent = "Fetching...";
         btPowered.textContent = "...";
         btDiscoverable.textContent = "...";
         btPairable.textContent = "...";
         btError.textContent = "";
-        btToggle.disabled = true; // Disable toggle while fetching
+        btToggle.disabled = true;
         btRefreshBtn.disabled = true;
 
         const result = await apiCall("/api/bluetooth/status", "GET");
 
-        if (result && result.error === null) {
-          // Check if error is explicitly null or undefined
-          btStatusText.textContent = "OK";
-          btPowered.textContent = result.powered ? "Yes" : "No";
-          btDiscoverable.textContent = result.discoverable ? "Yes" : "No";
-          btPairable.textContent = result.pairable ? "Yes" : "No";
-          // Update the toggle state based on discoverable AND pairable status
-          // Consider them enabled only if both are true
-          btToggle.checked = result.discoverable && result.pairable;
-          btToggle.disabled = false; // Re-enable toggle
+        if (result) {
+          // apiCall now always returns an object
+          updateBluetoothUI(result); // Update UI with fetched data or error
         } else {
-          btStatusText.textContent = "Error";
-          const errorMsg = result.error || "Failed to fetch status";
-          btError.textContent = errorMsg;
-          console.error("Bluetooth status error:", errorMsg);
-          btToggle.disabled = true; // Keep disabled on error
-          showToast(`Bluetooth Status Error: ${errorMsg}`, "error");
+          // Should not happen with current apiCall, but handle just in case
+          updateBluetoothUI({
+            error: "Failed to fetch status: Invalid response.",
+          });
         }
         btRefreshBtn.disabled = false; // Re-enable refresh button
       }
@@ -778,40 +786,31 @@
       btToggle.onchange = async () => {
         const enable = btToggle.checked;
         btToggle.disabled = true; // Disable during API call
+        btRefreshBtn.disabled = true; // Disable refresh during change
         btStatusText.textContent = enable ? "Enabling..." : "Disabling...";
+        btError.textContent = ""; // Clear previous errors
 
-        // Call both discoverable and pairable endpoints
-        const payload = { enable: enable };
-        const discoverableResult = await apiCall(
-          "/api/bluetooth/discoverable",
-          "POST",
-          payload
-        );
-        const pairableResult = await apiCall(
-          "/api/bluetooth/pairable",
-          "POST",
-          payload
-        );
+        // *** Call the NEW single endpoint ***
+        const result = await apiCall("/api/bluetooth/set_mode", "POST", {
+          enable: enable,
+        });
 
-        // Check results and update status/UI
-        if (discoverableResult.success && pairableResult.success) {
+        if (result && result.success) {
           showToast(
-            `Bluetooth ${enable ? "enabled" : "disabled"} successfully`,
+            result.message || `Bluetooth mode set to ${enable ? "ON" : "OFF"}`,
             "success"
           );
           // Refresh status after a short delay to allow system changes
           setTimeout(refreshBluetoothStatus, 1500);
         } else {
-          const errMsg = `Discoverable: ${
-            discoverableResult.message || discoverableResult.error
-          }. Pairable: ${pairableResult.message || pairableResult.error}`;
-          showToast(`Bluetooth update failed: ${errMsg}`, "error");
+          const errMsg = result.error || "Failed to set Bluetooth mode.";
+          showToast(`Error: ${errMsg}`, "error");
           btError.textContent = `Update failed: ${errMsg}`;
-          // Revert toggle state on failure and refresh status immediately
-          btToggle.checked = !enable; // Revert UI
-          refreshBluetoothStatus(); // Get actual current state
+          // Revert toggle state visually on failure and refresh status immediately
+          btToggle.checked = !enable; // Revert UI toggle
+          refreshBluetoothStatus(); // Get actual current state which likely failed to change
         }
-        // Re-enable is handled by refreshBluetoothStatus
+        // Re-enable is handled by refreshBluetoothStatus completing
       };
 
       btRefreshBtn.onclick = refreshBluetoothStatus;
@@ -819,17 +818,13 @@
       // --- Initial Setup ---
       document.addEventListener("DOMContentLoaded", () => {
         console.log("DOM Content Loaded");
-        // Set initial state for Realtime on load
         if (rtStatusEl) rtStatusEl.textContent = "Connecting...";
-        startBtn.disabled = true; // Disable until socket connects
+        startBtn.disabled = true;
         stopBtn.disabled = true;
-
-        // Set initial state for PDF
         pdfQASection.classList.add("hidden");
         pdfAskBtn.disabled = true;
-
-        // Initial Bluetooth status check (optional, might do it on tab click)
-        // refreshBluetoothStatus(); // Or call this when BT tab is first clicked
+        // Optional: Initial BT status check on load, or wait for tab click
+        // refreshBluetoothStatus();
       });
     </script>
   </body>
