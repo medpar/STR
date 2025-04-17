@@ -1,35 +1,30 @@
 #!/usr/bin/env python3
 """
-Centralised STR hardware/audio/GPIO settings.
+Centralised hardware / audio settings so you only change them once.
 
-Edit this file (or override with ENV vars) whenever the USB‑mic or DAC
-IDs change – no need to touch the rest of the code.
+Override any of these with environment variables in `.env`.
 """
 
 import os
 
-# ------------------------------------------------------------------#
-#  Audio (USB mic)                                                  #
-# ------------------------------------------------------------------#
+# ------------------------------------------------------------#
+#  Audio                                                      #
+# ------------------------------------------------------------#
 MIC_DEVICE_INDEX: int = int(os.getenv("MIC_DEVICE_INDEX", "1"))
+SAMPLE_RATE: int = int(os.getenv("MIC_SAMPLE_RATE", "44100"))   # 24000, 44100, 48000 …
+NUM_CHANNELS: int = int(os.getenv("MIC_CHANNELS", "1"))
+FRAME_CHUNK: int = int(os.getenv("MIC_CHUNK", "1024"))
 
-# Set to 0 to auto‑query the mic’s native rate each time
-MIC_SAMPLE_RATE: int = int(os.getenv("MIC_SAMPLE_RATE", "0"))
+# Normalise input audio to 90 % full‑scale to boost quiet mics
+NORMALISE_INPUT: bool = os.getenv("MIC_NORMALISE", "1") == "1"
 
-MIC_CHANNELS: int = int(os.getenv("MIC_CHANNELS", "1"))
-MIC_CHUNK: int = int(os.getenv("MIC_CHUNK", "1024"))
-MIC_NORMALISE: bool = os.getenv("MIC_NORMALISE", "1") == "1"
-
-# ------------------------------------------------------------------#
-#  Playback (PCM5102 DAC via aplay)                                 #
-# ------------------------------------------------------------------#
+# Speaker / DAC device for `aplay`
 DAC_APLAY_DEVICE: str = os.getenv("DAC_APLAY_DEVICE", "plughw:2,0")
 
-# ------------------------------------------------------------------#
-#  GPIO – push‑button + LED                                         #
-# ------------------------------------------------------------------#
-GPIO_BUTTON_PIN: int = int(os.getenv("GPIO_BUTTON_PIN", "17"))   # BCM
+# ------------------------------------------------------------#
+#  GPIO (only used on Raspberry Pi)                            #
+# ------------------------------------------------------------#
+GPIO_BUTTON_PIN: int = int(os.getenv("GPIO_BUTTON_PIN", "17"))  # BCM numbering
 GPIO_LED_PIN: int    = int(os.getenv("GPIO_LED_PIN", "27"))
-
-# External resistor pull‑down (True = button pulls GPIO *high* when pressed)
 BUTTON_ACTIVE_HIGH: bool = True
+
