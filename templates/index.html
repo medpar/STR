@@ -5,180 +5,308 @@
     <title>STR Proyecto</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.4/socket.io.js"></script>
+    <style>
+      /* Basic chat styling */
+      .chat-container {
+        display: flex;
+        flex-direction: column;
+        /* Adjust height based on your overall layout needs.
+           Maybe subtract header/tab height if they are fixed. */
+        height: calc(100vh - 150px); /* Example: Adjust 150px as needed */
+        max-height: 75vh; /* Limit overall height */
+      }
+      .chat-history {
+        flex-grow: 1; /* Takes available space */
+        overflow-y: auto; /* Enables scrolling */
+        padding: 1rem; /* Add padding */
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem; /* Space between bubbles */
+      }
+      .chat-input-area {
+        padding: 1rem; /* Add padding */
+        border-top: 1px solid #e5e7eb; /* Separator line */
+        background-color: #f9fafb; /* Slight background differentiation */
+      }
+      .input-box { /* General style for text inputs/areas */
+        padding: 0.75rem 1rem;
+        border: 1px solid #d1d5db;
+        border-radius: 0.375rem;
+        flex-grow: 1; /* Input takes available width */
+        outline-none;
+        focus:border-blue-500 focus:ring-1 focus:ring-blue-500; /* Basic focus style */
+      }
+      .bubble {
+        padding: 0.75rem 1rem;
+        border-radius: 0.75rem; /* Slightly more rounded */
+        max-width: 80%;
+        word-wrap: break-word; /* Prevent long words from overflowing */
+        box-shadow: 0 1px 2px rgba(0,0,0,0.05); /* Subtle shadow */
+      }
+      .user {
+        background-color: #dbeafe; /* Lighter blue */
+        color: #1e40af;
+        align-self: flex-end;
+        border-bottom-right-radius: 0.25rem; /* Tail effect */
+      }
+      .bot {
+        background-color: #f3f4f6; /* Lighter gray */
+        color: #1f2937;
+        align-self: flex-start;
+        border-bottom-left-radius: 0.25rem; /* Tail effect */
+      }
+      .btn-primary {
+        background-color: #2563eb; /* Tailwind blue-600 */
+        color: white;
+        padding: 0.6rem 1.2rem; /* Slightly larger padding */
+        border-radius: 0.375rem;
+        font-weight: 500;
+        white-space: nowrap; /* Prevent button text wrapping */
+        transition: background-color 0.2s ease;
+      }
+      .btn-primary:hover {
+        background-color: #1d4ed8; /* Darker blue */
+      }
+      .btn-primary:disabled {
+          background-color: #9ca3af;
+          cursor: not-allowed;
+      }
+      .btn-secondary {
+        background-color: #6b7280; /* Gray-500 */
+        color: white;
+        padding: 0.6rem 1.2rem;
+        border-radius: 0.375rem;
+        font-weight: 500;
+        white-space: nowrap;
+        transition: background-color 0.2s ease;
+      }
+      .btn-secondary:hover {
+        background-color: #4b5563; /* Darker gray */
+      }
+       .btn-secondary:disabled {
+          background-color: #9ca3af;
+          cursor: not-allowed;
+      }
+      audio {
+        width: 100%;
+        margin-top: 0.5rem;
+      }
+      /* Tab styling */
+      .tab {
+        padding: 0.5rem 1rem;
+        border-bottom: 3px solid transparent; /* Thicker underline */
+        color: #6b7280; /* Default tab color */
+        font-weight: 500;
+        transition: all 0.2s ease;
+      }
+      .tab:hover {
+        color: #3b82f6; /* Blue on hover */
+      }
+      .tab.active {
+        border-color: #2563eb; /* Blue underline for active */
+        color: #2563eb; /* Blue text for active */
+        font-weight: 600;
+      }
+      /* Hide scrollbar for cleaner look (optional) */
+      .chat-history::-webkit-scrollbar { display: none; }
+      .chat-history { -ms-overflow-style: none; scrollbar-width: none; }
+    </style>
   </head>
-  <body class="bg-gray-50 text-gray-900">
-    <div class="max-w-4xl mx-auto py-8 flex flex-col gap-6">
+  <body class="bg-gray-100 text-gray-900 font-sans">
+    <!-- Changed bg, added font -->
+    <div
+      class="max-w-3xl mx-auto py-6 px-4 sm:px-6 lg:px-8 flex flex-col gap-5"
+    >
+      <!-- Adjusted max-width, padding -->
       <!-- Title -->
-      <h1 class="text-3xl font-bold text-center">📡 Proyecto STR</h1>
+      <h1 class="text-3xl font-bold text-center text-gray-800">
+        📡 Proyecto STR
+      </h1>
 
       <!-- Tabs -->
-      <nav class="flex gap-4 border-b pb-2" id="tabs">
+      <nav class="flex justify-center border-b border-gray-300 pb-0" id="tabs">
+        <!-- Center tabs -->
         <button data-tab="tts" class="tab active">TTS</button>
         <button data-tab="agent" class="tab">Agent</button>
         <button data-tab="realtime" class="tab">Realtime</button>
         <button data-tab="pdf" class="tab">PDF</button>
       </nav>
 
-      <!-- ------------ TTS ------------- -->
-      <section id="panel-tts" class="panel flex flex-col gap-4">
-        <div id="ttsFeed" class="feed"></div>
-        <div class="flex flex-col gap-2">
-          <textarea
-            id="ttsInput"
-            class="input-box"
-            placeholder="Escribe texto…"
-          ></textarea>
-          <div class="flex gap-2">
-            <button id="ttsSend" class="btn-primary">Enviar</button>
-            <button id="ttsClear" class="btn-secondary">Limpiar</button>
-          </div>
-        </div>
-      </section>
+      <!-- Panels Container -->
+      <div class="bg-white rounded-lg shadow-md overflow-hidden">
+        <!-- Card-like container for panels -->
 
-      <!-- ------------ Agent ----------- -->
-      <section id="panel-agent" class="panel hidden flex flex-col gap-4">
-        <div id="agentFeed" class="feed"></div>
-        <div class="flex flex-col gap-2">
-          <textarea
-            id="agentInput"
-            class="input-box"
-            placeholder="Pregunta…"
-          ></textarea>
-          <div class="flex gap-2">
-            <button id="agentSend" class="btn-primary">Enviar</button>
-            <button id="agentClear" class="btn-secondary">Limpiar</button>
+        <!-- ------------ TTS ------------- -->
+        <section id="panel-tts" class="panel chat-container">
+          <!-- History Area -->
+          <div id="ttsFeed" class="chat-history">
+            <!-- Bubbles will be appended here -->
           </div>
-        </div>
-      </section>
-
-      <!-- -------- Realtime ------------ -->
-      <section id="panel-realtime" class="panel hidden flex flex-col gap-4">
-        <div id="realtimeFeed" class="feed"></div>
-        <div class="flex flex-col gap-4">
-          <div class="flex gap-2">
-            <button id="startTalking" class="btn-primary">🎙️ Start</button>
-            <button id="stopTalking" class="btn-secondary" disabled>
-              ⏹️ Stop
-            </button>
-            <button id="rtClear" class="btn-secondary">Limpiar</button>
+          <!-- Input Area -->
+          <div class="chat-input-area flex flex-col sm:flex-row gap-3">
+            <textarea
+              id="ttsInput"
+              class="input-box resize-none flex-grow"
+              placeholder="Escribe texto…"
+              rows="2"
+            ></textarea>
+            <div class="flex gap-2 justify-end sm:justify-start">
+              <button id="ttsSend" class="btn-primary">Enviar</button>
+              <button id="ttsClear" class="btn-secondary">Limpiar</button>
+            </div>
           </div>
-          <div class="flex gap-2">
-            <input
-              id="realtimeText"
-              class="input-box flex-grow"
-              placeholder="Enviar texto al aire…"
-            />
-            <button id="realtimeTextSend" class="btn-primary">Enviar</button>
+        </section>
+
+        <!-- ------------ Agent ----------- -->
+        <section id="panel-agent" class="panel chat-container hidden">
+          <!-- History Area -->
+          <div id="agentFeed" class="chat-history">
+            <!-- Bubbles will be appended here -->
           </div>
-          <p id="realtimeStatus" class="text-sm text-gray-600"></p>
-        </div>
-      </section>
+          <!-- Input Area -->
+          <div class="chat-input-area flex flex-col sm:flex-row gap-3">
+            <textarea
+              id="agentInput"
+              class="input-box resize-none flex-grow"
+              placeholder="Pregunta…"
+              rows="2"
+            ></textarea>
+            <div class="flex gap-2 justify-end sm:justify-start">
+              <button id="agentSend" class="btn-primary">Enviar</button>
+              <button id="agentClear" class="btn-secondary">Limpiar</button>
+            </div>
+          </div>
+        </section>
 
-      <!-- ------------- PDF ------------ -->
-      <section id="panel-pdf" class="panel hidden flex flex-col gap-4">
-        <div id="pdfFeed" class="feed"></div>
-        <div class="flex flex-col gap-2">
-          <!-- File chooser -->
-          <input
-            type="file"
-            id="pdfFile"
-            accept="application/pdf"
-            class="input-box"
-          />
-          <p id="pdfUploadStatus" class="text-sm text-gray-600">
-            Elige un PDF para cargar…
-          </p>
-
-          <!-- Q&A controls (hidden until PDF ready) -->
-          <div id="pdfQA" class="hidden flex flex-col gap-2">
+        <!-- -------- Realtime ------------ -->
+        <section id="panel-realtime" class="panel chat-container hidden">
+          <!-- History Area -->
+          <div id="realtimeFeed" class="chat-history">
+            <!-- Bubbles will be appended here -->
+            <p
+              id="realtimeStatus"
+              class="text-sm text-center text-gray-500 px-4 py-2 self-center bg-gray-100 rounded-full"
+            >
+              Initializing...
+            </p>
+          </div>
+          <!-- Input Area -->
+          <div class="chat-input-area flex flex-col gap-4">
+            <div class="flex flex-wrap gap-2 justify-center">
+              <!-- Centered buttons -->
+              <button id="startTalking" class="btn-primary">🎙️ Start</button>
+              <!-- Added nbsp -->
+              <button id="stopTalking" class="btn-secondary" disabled>
+                ⏹️ Stop
+              </button>
+              <button id="rtClear" class="btn-secondary">Limpiar</button>
+            </div>
             <div class="flex gap-2">
+              <input
+                id="realtimeText"
+                class="input-box flex-grow"
+                placeholder="Enviar texto al aire…"
+              />
+              <button id="realtimeTextSend" class="btn-primary">Enviar</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- ------------- PDF ------------ -->
+        <section id="panel-pdf" class="panel chat-container hidden">
+          <!-- History Area -->
+          <div id="pdfFeed" class="chat-history">
+            <!-- Bubbles will be appended here -->
+            <p
+              id="pdfUploadStatus"
+              class="text-sm text-center text-gray-500 px-4 py-2 self-center bg-gray-100 rounded-full"
+            >
+              Elige un PDF para cargar…
+            </p>
+          </div>
+          <!-- Input Area -->
+          <div class="chat-input-area flex flex-col gap-3">
+            <!-- File chooser -->
+            <input
+              type="file"
+              id="pdfFile"
+              accept="application/pdf"
+              class="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 cursor-pointer"
+            />
+            <!-- Q&A controls (initially hidden) -->
+            <div id="pdfQA" class="hidden flex flex-col sm:flex-row gap-3 mt-2">
               <input
                 id="pdfQuestion"
                 class="input-box flex-grow"
                 placeholder="Pregunta sobre tu PDF…"
               />
-              <button id="pdfAsk" class="btn-primary">Preguntar</button>
-              <button id="pdfClear" class="btn-secondary">Limpiar</button>
+              <div class="flex gap-2 justify-end sm:justify-start">
+                <button id="pdfAsk" class="btn-primary">Preguntar</button>
+                <button id="pdfClear" class="btn-secondary">Limpiar</button>
+              </div>
             </div>
           </div>
-        </div>
-      </section>
+        </section>
+      </div>
+      <!-- End Card-like container -->
     </div>
 
-    <style>
-      .tab {
-        padding: 0.5rem 1rem;
-        border-bottom: 2px solid transparent;
-      }
-      .tab.active {
-        border-color: rgb(29 78 216);
-        color: rgb(29 78 216);
-        font-weight: 600;
-      }
-      .input-box {
-        padding: 0.5rem;
-        border: 1px solid #ccc;
-        border-radius: 0.375rem;
-      }
-      .feed {
-        display: flex;
-        flex-direction: column;
-        gap: 1rem;
-        max-height: 400px;
-        overflow-y: auto;
-      }
-      .bubble {
-        padding: 0.75rem 1rem;
-        border-radius: 0.5rem;
-        max-width: 80%;
-      }
-      .user {
-        background: #e0f2fe;
-        align-self: flex-end;
-      }
-      .bot {
-        background: #f1f5f9;
-        align-self: flex-start;
-      }
-      .btn-primary {
-        background: rgb(29 78 216);
-        color: #fff;
-        padding: 0.5rem 1rem;
-        border-radius: 0.375rem;
-      }
-      .btn-primary:hover {
-        background: rgb(30 64 175);
-      }
-      .btn-secondary {
-        background: rgb(75 85 99);
-        color: #fff;
-        padding: 0.5rem 1rem;
-        border-radius: 0.375rem;
-      }
-      .btn-secondary:hover {
-        background: rgb(55 65 81);
-      }
-      audio {
-        width: 100%;
-        margin-top: 0.5rem;
-      }
-    </style>
-
+    <!-- Keep existing script tag -->
     <script>
       const socket = io("/realtime");
       const el = (sel) => document.querySelector(sel);
-      const feedClear = (sel) => {
-        el(sel).innerHTML = "";
+      // Helper to clear feed and add back status messages if needed
+      const feedClear = (feedSel, statusSel = null, initialMsg = "") => {
+        const feed = el(feedSel);
+        feed.innerHTML = "";
+        if (statusSel && initialMsg) {
+          // Re-add status message if applicable (like for PDF/Realtime)
+          const statusElement = el(statusSel);
+          if (statusElement) {
+            // If status is inside the feed, re-create it
+            if (feed.contains(statusElement)) {
+              const p = document.createElement("p");
+              p.id = statusElement.id; // Keep the ID
+              p.className = statusElement.className; // Keep classes
+              p.textContent = initialMsg;
+              feed.appendChild(p);
+            } else {
+              // If status is outside feed, just update text
+              statusElement.textContent = initialMsg;
+            }
+          }
+        }
       };
 
       function appendBubble(feedSel, text, who, audioUrl) {
+        const feed = el(feedSel);
+        // Remove any initial status message placeholder inside the feed
+        const statusMsg = feed.querySelector('p[id$="Status"]'); // Find status <p> if it's inside
+        if (
+          statusMsg &&
+          feed.children.length === 1 &&
+          feed.firstChild === statusMsg
+        ) {
+          statusMsg.remove();
+        }
+
         const div = document.createElement("div");
         div.className = `bubble ${who}`;
-        div.innerHTML =
-          `<p>${text}</p>` +
-          (audioUrl ? `<audio controls src="${audioUrl}"></audio>` : "");
-        el(feedSel).appendChild(div);
-        div.scrollIntoView({ behavior: "smooth" });
+        // Sanitize text before inserting as HTML to prevent XSS
+        const textNode = document.createElement("p");
+        textNode.textContent = text; // Use textContent for safety
+        div.appendChild(textNode);
+
+        if (audioUrl) {
+          const audio = document.createElement("audio");
+          audio.controls = true;
+          audio.src = audioUrl;
+          audio.className = "mt-2 w-full"; // Add margin top
+          div.appendChild(audio);
+        }
+        feed.appendChild(div);
+        // Scroll to the bottom smoothly
+        feed.scrollTo({ top: feed.scrollHeight, behavior: "smooth" });
       }
 
       /* ---------- Tabs ---------- */
@@ -191,108 +319,235 @@
           document
             .querySelectorAll(".panel")
             .forEach((p) => p.classList.add("hidden"));
-          el(`#panel-${btn.dataset.tab}`).classList.remove("hidden");
+          const activePanel = el(`#panel-${btn.dataset.tab}`);
+          activePanel.classList.remove("hidden");
+          // Scroll to bottom of history when switching tabs
+          const history = activePanel.querySelector(".chat-history");
+          if (history) {
+            history.scrollTop = history.scrollHeight;
+          }
         };
       });
 
       /* ---------- TTS ---------- */
       el("#ttsSend").onclick = async () => {
-        const txt = el("#ttsInput").value.trim();
+        const txtInput = el("#ttsInput");
+        const txt = txtInput.value.trim();
         if (!txt) return;
         appendBubble("#ttsFeed", txt, "user");
-        el("#ttsInput").value = "";
-        const r = await fetch("/api/tts", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: txt }),
-        });
-        const j = await r.json();
-        if (r.ok) appendBubble("#ttsFeed", j.message, "bot", j.audio_url);
-        else alert(j.error);
+        txtInput.value = "";
+        txtInput.focus(); // Keep focus on input
+        try {
+          const r = await fetch("/api/tts", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text: txt }),
+          });
+          const j = await r.json();
+          if (r.ok) appendBubble("#ttsFeed", j.message, "bot", j.audio_url);
+          else
+            appendBubble(
+              "#ttsFeed",
+              `Error: ${j.error || r.statusText}`,
+              "bot"
+            );
+        } catch (error) {
+          appendBubble("#ttsFeed", `Network Error: ${error.message}`, "bot");
+        }
       };
       el("#ttsClear").onclick = () => feedClear("#ttsFeed");
+      el("#ttsInput").addEventListener("keypress", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault(); // Prevent new line
+          el("#ttsSend").click(); // Trigger send
+        }
+      });
 
       /* ---------- Agent ---------- */
       el("#agentSend").onclick = async () => {
-        const q = el("#agentInput").value.trim();
+        const agentInput = el("#agentInput");
+        const q = agentInput.value.trim();
         if (!q) return;
         appendBubble("#agentFeed", q, "user");
-        el("#agentInput").value = "";
-        const r = await fetch("/api/agent", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query: q }),
-        });
-        const j = await r.json();
-        if (r.ok) appendBubble("#agentFeed", j.message, "bot", j.audio_url);
-        else alert(j.error);
+        agentInput.value = "";
+        agentInput.focus();
+        try {
+          const r = await fetch("/api/agent", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ query: q }),
+          });
+          const j = await r.json();
+          if (r.ok) appendBubble("#agentFeed", j.message, "bot", j.audio_url);
+          else
+            appendBubble(
+              "#agentFeed",
+              `Error: ${j.error || r.statusText}`,
+              "bot"
+            );
+        } catch (error) {
+          appendBubble("#agentFeed", `Network Error: ${error.message}`, "bot");
+        }
       };
       el("#agentClear").onclick = () => feedClear("#agentFeed");
+      el("#agentInput").addEventListener("keypress", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          el("#agentSend").click();
+        }
+      });
 
       /* ---------- Realtime ---------- */
-      el("#startTalking").onclick = () => {
+      const rtStatusEl = el("#realtimeStatus"); // Cache status element selector
+      const startBtn = el("#startTalking");
+      const stopBtn = el("#stopTalking");
+
+      startBtn.onclick = () => {
         socket.emit("start_talking");
-        el("#startTalking").disabled = true;
-        el("#stopTalking").disabled = false;
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
+        if (rtStatusEl) rtStatusEl.textContent = "Recording…"; // Update status text directly
       };
-      el("#stopTalking").onclick = () => {
+      stopBtn.onclick = () => {
         socket.emit("stop_talking");
-        el("#stopTalking").disabled = true;
-        el("#startTalking").disabled = false;
+        stopBtn.disabled = true;
+        // Don't re-enable start immediately, wait for status update maybe
+        if (rtStatusEl) rtStatusEl.textContent = "Processing…";
       };
-      el("#rtClear").onclick = () => feedClear("#realtimeFeed");
+      el("#rtClear").onclick = () =>
+        feedClear("#realtimeFeed", "#realtimeStatus", "Ready"); // Clear feed, reset status
+
       el("#realtimeTextSend").onclick = () => {
-        const m = el("#realtimeText").value.trim();
+        const rtTextInput = el("#realtimeText");
+        const m = rtTextInput.value.trim();
         if (!m) return;
         appendBubble("#realtimeFeed", m, "user");
-        el("#realtimeText").value = "";
+        rtTextInput.value = "";
+        rtTextInput.focus();
         socket.emit("send_text", { text: m });
       };
-      socket.on(
-        "status",
-        (d) => (el("#realtimeStatus").textContent = d.message)
-      );
-      socket.on("broadcast_text", (d) =>
-        appendBubble("#realtimeFeed", d.message, "bot")
-      );
+      el("#realtimeText").addEventListener("keypress", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          el("#realtimeTextSend").click();
+        }
+      });
+
+      // Update status and re-enable start button when ready
+      socket.on("status", (d) => {
+        if (rtStatusEl) rtStatusEl.textContent = d.message;
+        if (d.message === "Ready" || d.message === "Processing…") {
+          // Or other non-recording states
+          startBtn.disabled = false;
+          stopBtn.disabled = true;
+        } else if (d.message === "Recording…") {
+          startBtn.disabled = true;
+          stopBtn.disabled = false;
+        }
+      });
+
+      socket.on("broadcast_text", (d) => {
+        appendBubble("#realtimeFeed", d.message, "bot");
+        startBtn.disabled = false; // Re-enable start after bot speaks
+        stopBtn.disabled = true;
+        if (rtStatusEl) rtStatusEl.textContent = "Ready"; // Update status
+      });
+      socket.on("connect", () => {
+        if (rtStatusEl) rtStatusEl.textContent = "Connected. Ready.";
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+      });
+      socket.on("disconnect", () => {
+        if (rtStatusEl) rtStatusEl.textContent = "Disconnected.";
+        startBtn.disabled = true;
+        stopBtn.disabled = true;
+      });
 
       /* ---------- PDF: auto‑upload & Q&A ---------- */
       let currentPDF = null;
-      el("#pdfFile").onchange = async () => {
-        const f = el("#pdfFile").files[0];
+      const pdfStatusEl = el("#pdfUploadStatus"); // Cache status element selector
+      const pdfQASection = el("#pdfQA");
+      const pdfFileInput = el("#pdfFile");
+      const pdfQuestionInput = el("#pdfQuestion");
+
+      pdfFileInput.onchange = async () => {
+        const f = pdfFileInput.files[0];
         if (!f) return;
-        el("#pdfUploadStatus").textContent =
-          "Subiendo e indexando… por favor espera";
+        pdfStatusEl.textContent = "Subiendo e indexando… por favor espera";
+        pdfStatusEl.classList.remove("hidden"); // Ensure status visible
+        pdfQASection.classList.add("hidden"); // Hide Q&A while uploading
+        currentPDF = null; // Reset current PDF
+
         const fd = new FormData();
         fd.append("file", f);
-        const r = await fetch("/api/pdf/upload", { method: "POST", body: fd });
-        const j = await r.json();
-        if (r.ok) {
-          currentPDF = j.filename;
-          el("#pdfUploadStatus").textContent = `PDF listo: ${currentPDF}`;
-          el("#pdfQA").classList.remove("hidden");
-        } else {
-          alert(j.error);
-          el("#pdfUploadStatus").textContent = "Error al cargar";
+        try {
+          const r = await fetch("/api/pdf/upload", {
+            method: "POST",
+            body: fd,
+          });
+          const j = await r.json();
+          if (r.ok) {
+            currentPDF = j.filename;
+            pdfStatusEl.textContent = `✅ PDF listo: ${currentPDF}`;
+            pdfQASection.classList.remove("hidden");
+            pdfQuestionInput.focus();
+          } else {
+            pdfStatusEl.textContent = `⚠️ Error al cargar: ${
+              j.error || r.statusText
+            }`;
+            pdfFileInput.value = ""; // Clear file input on error
+          }
+        } catch (error) {
+          pdfStatusEl.textContent = `⚠️ Network Error: ${error.message}`;
+          pdfFileInput.value = ""; // Clear file input on error
         }
       };
 
       el("#pdfAsk").onclick = async () => {
-        const q = el("#pdfQuestion").value.trim();
+        const q = pdfQuestionInput.value.trim();
         if (!q || !currentPDF) return;
         appendBubble("#pdfFeed", q, "user");
-        el("#pdfQuestion").value = "";
-        const r = await fetch("/api/pdf/ask", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ question: q, filename: currentPDF }),
-        });
-        const j = await r.json();
-        if (r.ok) appendBubble("#pdfFeed", j.answer, "bot", j.audio_url);
-        else alert(j.error);
+        pdfQuestionInput.value = "";
+        pdfQuestionInput.focus();
+        try {
+          const r = await fetch("/api/pdf/ask", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ question: q, filename: currentPDF }),
+          });
+          const j = await r.json();
+          if (r.ok) appendBubble("#pdfFeed", j.answer, "bot", j.audio_url);
+          else
+            appendBubble(
+              "#pdfFeed",
+              `Error: ${j.error || r.statusText}`,
+              "bot"
+            );
+        } catch (error) {
+          appendBubble("#pdfFeed", `Network Error: ${error.message}`, "bot");
+        }
       };
+      pdfQuestionInput.addEventListener("keypress", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          el("#pdfAsk").click();
+        }
+      });
 
-      el("#pdfClear").onclick = () => feedClear("#pdfFeed");
+      el("#pdfClear").onclick = () =>
+        feedClear(
+          "#pdfFeed",
+          "#pdfUploadStatus",
+          `PDF listo: ${currentPDF || "Ninguno cargado"}`
+        ); // Clear feed, maintain status
+
+      // Set initial state for Realtime on load
+      document.addEventListener("DOMContentLoaded", () => {
+        if (rtStatusEl) rtStatusEl.textContent = "Connecting...";
+        // Ensure correct initial button state for realtime
+        startBtn.disabled = true; // Disable until connected
+        stopBtn.disabled = true;
+      });
     </script>
   </body>
 </html>
