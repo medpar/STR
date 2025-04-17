@@ -3,10 +3,312 @@ Directory structure:
     ├── realtime.py
     ├── tts.py
     ├── audio_manager.py
+    ├── utils/
+    │   ├── test_mic.py
+    │   └── test_realtime.py
     ├── agents.py
     ├── app.py
-    └── templates/
-        └── index.html
+    ├── templates/
+    │   └── index.html
+    └── file_manager.py
+
+================================================
+File: /realtime.py
+================================================
+#!/usr/bin/env python3
+"""
+Realtime speech‑to‑speech support for STR.
+
+• Capture microphone audio with PyAudio
+• Send mic or user‑typed text to OpenAI Realtime API
+• Play voice replies (PCM‑16, 24 kHz)
+• Broadcast every assistant text delta to Flask‑SocketIO
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import json
+import logging
+import os
+import ssl
+import threading
+from typing import Callable, Optional
+
+import pyaudio
+import websockets                        # ==13.* required (<14)
+
+# ------------------------------------------------------------------#
+#  Logging                                                          #
+# ------------------------------------------------------------------#
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)5s | %(name)s | %(message)s",
+)
+log = logging.getLogger("realtime")
+
+# ------------------------------------------------------------------#
+#  System‑wide prompt                                               #
+# ------------------------------------------------------------------#
+INSTRUCTIONS = (
+    "You are a professional radio broadcaster. Provide a natural, "
+    "broadcast‑style answer. Answer in Spanish from Spain. Use European "
+    "format for all dates and units. Do not say anything in your first "
+    "message except 'Hello'. Answer in short sentences."
+)
+
+# ------------------------------------------------------------------#
+#  Audio helper                                                     #
+# ------------------------------------------------------------------#
+class AudioHandler:
+    """Microphone capture & speaker playback (PyAudio)."""
+
+    def __init__(
+        self,
+        rate: int = 24_000,
+        chunk: int = 1_024,
+        channels: int = 1,
+        fmt: int = pyaudio.paInt16,
+        input_device_index: Optional[int] = None,
+    ):
+        self.rate = rate
+        self.chunk = chunk
+        self.channels = channels
+        self.fmt = fmt
+        self.input_device_index = input_device_index
+        self.p = pyaudio.PyAudio()
+        self.stream_in = None
+        self._recording = False
+
+        # Show available capture devices (handy on Pi vs Mac)
+        for i in range(self.p.get_device_count()):
+            dev = self.p.get_device_info_by_index(i)
+            if dev["maxInputChannels"]:
+                log.debug("Input‑ID %s – %s", i, dev["name"])
+
+    # ------------- microphone -------------#
+    def start_rec(self) -> None:
+        if self.stream_in:
+            self.stop_rec()
+        self.stream_in = self.p.open(
+            format=self.fmt,
+            channels=self.channels,
+            rate=self.rate,
+            input=True,
+            frames_per_buffer=self.chunk,
+            input_device_index=self.input_device_index,
+        )
+        self._recording = True
+        log.info("🎙️  Mic ON (%s)", self.input_device_index)
+
+    def read_chunk(self) -> bytes | None:
+        if not self._recording or not self.stream_in:
+            return None
+        try:
+            return self.stream_in.read(
+                self.chunk, exception_on_overflow=False
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.error("Mic chunk error: %s", exc)
+            return None
+
+    def stop_rec(self) -> None:
+        if self.stream_in:
+            self.stream_in.stop_stream()
+            self.stream_in.close()
+            self.stream_in = None
+        self._recording = False
+        log.info("🎙️  Mic OFF")
+
+    # ------------- speaker ---------------#
+    def play(self, pcm16_audio: bytes) -> None:
+        def _worker():
+            try:
+                out = self.p.open(
+                    format=self.fmt, channels=1, rate=self.rate, output=True
+                )
+                out.write(pcm16_audio)
+                out.stop_stream()
+                out.close()
+            except Exception as exc:  # noqa: BLE001
+                log.error("Speaker error: %s", exc)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    # ------------- cleanup ---------------#
+    def close(self) -> None:
+        self.stop_rec()
+        self.p.terminate()
+
+
+# ------------------------------------------------------------------#
+#  RealtimeClient                                                   #
+# ------------------------------------------------------------------#
+class RealtimeClient:
+    """
+    One shared instance lives inside app.py.
+
+    Public methods (thread‑safe):
+        • start_talking()
+        • stop_talking()
+        • send_text(str)
+    """
+
+    _URL = "wss://api.openai.com/v1/realtime"
+    _MODEL = "gpt-4o-mini-realtime-preview"
+
+    def __init__(
+        self,
+        instructions: str,
+        voice: str = "ash",                       # <<<  voice changed here
+        mic_index: Optional[int] = None,
+        on_text: Callable[[str], None] | None = None,
+    ):
+        # -- keys & loop ----------------------------------------------------#
+        self.api_key = os.getenv("OPENAI_API_KEY")
+        if not self.api_key:
+            raise RuntimeError("OPENAI_API_KEY not set")
+
+        self.voice = voice
+        self.instructions = instructions
+        self.on_text = on_text
+
+        self.audio = AudioHandler(input_device_index=mic_index)
+        self._audio_buf = b""
+        self._txt_buf = ""
+
+        self.loop = asyncio.new_event_loop()
+        threading.Thread(target=self.loop.run_forever, daemon=True).start()
+
+        self.ws = asyncio.run_coroutine_threadsafe(
+            self._connect(), self.loop
+        ).result()
+        asyncio.run_coroutine_threadsafe(
+            self._receive_loop(), self.loop
+        )
+
+        self._rec_flag = threading.Event()
+
+    # ---------------- WebSocket plumbing ------------------#
+    async def _connect(self):
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+
+        self.ws = await websockets.connect(
+            f"{self._URL}?model={self._MODEL}",
+            extra_headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "OpenAI-Beta": "realtime=v1",
+            },
+            ssl=ssl_ctx,
+        )
+
+        await self._send(
+            {
+                "type": "session.update",
+                "session": {
+                    "modalities": ["audio", "text"],
+                    "instructions": self.instructions,
+                    "voice": self.voice,
+                    "input_audio_format": "pcm16",
+                    "output_audio_format": "pcm16",
+                    "turn_detection": None,  # manual VAD
+                    "input_audio_transcription": {"model": "whisper-1"},
+                    "temperature": 0.6,
+                },
+            }
+        )
+        await self._send({"type": "response.create"})
+        log.info("OpenAI Realtime session ready")
+        return self.ws
+
+    async def _send(self, ev: dict) -> None:
+        await self.ws.send(json.dumps(ev))
+
+    async def _receive_loop(self):
+        try:
+            async for msg in self.ws:
+                await self._handle(json.loads(msg))
+        except Exception as exc:  # noqa: BLE001
+            log.error("Receive loop exited: %s", exc)
+
+    async def _handle(self, ev: dict) -> None:
+        t = ev.get("type")
+        if t == "error":
+            log.error("API error: %s", ev["error"]["message"])
+        elif t == "response.text.delta":
+            self._txt_buf += ev["delta"]
+        elif t == "response.text.done":
+            if self.on_text:
+                self.on_text(self._txt_buf)
+            self._txt_buf = ""
+        elif t == "response.audio.delta":
+            self._audio_buf += base64.b64decode(ev["delta"])
+        elif t == "response.audio.done":
+            if self._audio_buf:
+                self.audio.play(self._audio_buf)
+            self._audio_buf = b""
+        else:
+            log.debug("Event %s", t)
+
+    # ---------------- mic streaming -----------------------#
+    async def _mic_stream(self):
+        self.audio.start_rec()
+        try:
+            while self._rec_flag.is_set():
+                chk = self.audio.read_chunk()
+                if chk:
+                    await self._send(
+                        {
+                            "type": "input_audio_buffer.append",
+                            "audio": base64.b64encode(chk).decode(),
+                        }
+                    )
+                await asyncio.sleep(0.0)
+        finally:
+            self.audio.stop_rec()
+            await self._send({"type": "input_audio_buffer.commit"})
+            await self._send({"type": "response.create"})
+            log.info("Mic buffer committed")
+
+    # ---------------- text send ---------------------------#
+    async def _send_text_async(self, text: str):
+        await self._send(
+            {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": text}],
+                },
+            }
+        )
+        await self._send({"type": "response.create"})
+
+    # ---------------- public (thread‑safe) ----------------#
+    def start_talking(self):
+        if self._rec_flag.is_set():
+            return
+        self._rec_flag.set()
+        asyncio.run_coroutine_threadsafe(self._mic_stream(), self.loop)
+
+    def stop_talking(self):
+        self._rec_flag.clear()
+
+    def send_text(self, text: str):
+        asyncio.run_coroutine_threadsafe(
+            self._send_text_async(text), self.loop
+        )
+
+    # ---------------- shutdown ----------------------------#
+    def close(self):
+        self.audio.close()
+        if self.ws and not self.ws.closed:
+            asyncio.run_coroutine_threadsafe(self.ws.close(), self.loop)
+        self.loop.call_soon_threadsafe(self.loop.stop())
+
 
 ================================================
 File: /tts.py
@@ -88,7 +390,7 @@ def play_audio(filepath):
     try:
         if sys.platform.startswith("linux"):
             # Raspberry Pi: using aplay with PCM5102 DAC configuration
-            play_cmd = ["aplay", "-D", "plughw:1,0", filepath]
+            play_cmd = ["aplay", "-D", "plughw:2,0", filepath]
         elif sys.platform == "darwin":
             # macOS: using afplay
             play_cmd = ["afplay", filepath]
@@ -101,6 +403,516 @@ def play_audio(filepath):
         logging.exception("Error playing audio.")
         raise e
 
+
+================================================
+File: /utils/test_mic.py
+================================================
+#!/usr/bin/env python3
+import os
+import time
+import threading
+import pyaudio
+import wave
+import numpy as np  # pip3 install numpy
+
+# Flag para detener la grabación
+stop_flag = False
+
+def wait_for_enter():
+    """Espera a que el usuario pulse ENTER y marca stop_flag."""
+    global stop_flag
+    input()
+    stop_flag = True
+
+def record_to_file(pa, device_index, rate, channels, out_path):
+    """Graba audio hasta que se pulse ENTER de nuevo y lo guarda en out_path,
+    aplicando normalización para subir el volumen."""
+    global stop_flag
+    stop_flag = False
+
+    stream = pa.open(format=pyaudio.paInt16,
+                     channels=channels,
+                     rate=rate,
+                     input=True,
+                     frames_per_buffer=1024,
+                     input_device_index=device_index)
+
+    frames = []
+    print(f"\n🔴 Grabando a {rate} Hz, {channels} canal(es)... pulsa ENTER para parar.")
+
+    # Hilo que espera el ENTER
+    t = threading.Thread(target=wait_for_enter)
+    t.start()
+
+    while not stop_flag:
+        try:
+            data = stream.read(1024, exception_on_overflow=False)
+            frames.append(data)
+        except OSError as e:
+            print(f"[Warning] overflow: {e}")
+
+    t.join()
+    stream.stop_stream()
+    stream.close()
+
+    # Combina los frames y convierte a array de int16
+    raw = b''.join(frames)
+    audio = np.frombuffer(raw, dtype=np.int16)
+    if audio.size:
+        # Normaliza hasta 90% del rango para subir volumen
+        peak = np.max(np.abs(audio))
+        gain = int(0.9 * 32767 / peak) if peak > 0 else 1
+        if gain > 1:
+            audio = np.clip(audio * gain, -32768, 32767).astype(np.int16)
+            print(f"🔊 Ganancia aplicada: {gain}×")
+    else:
+        print("⚠️ Atención: no se detectó audio.")
+
+    # Guarda el WAV con la frecuencia correcta en el header
+    wf = wave.open(out_path, 'wb')
+    wf.setnchannels(channels)
+    wf.setsampwidth(pa.get_sample_size(pyaudio.paInt16))
+    wf.setframerate(rate)
+    wf.writeframes(audio.tobytes())
+    wf.close()
+    print(f"✅ Guardado → {out_path}\n")
+
+def main():
+    pa = pyaudio.PyAudio()
+
+    # --- Parámetros fijos ---
+    device_index = 1           # ID del mic USB por defecto
+    rate         = 48000       # forzamos 44.1 kHz para evitar aceleración
+    channels     = 1           # mono
+
+    info = pa.get_device_info_by_index(device_index)
+    print(f"📌 Usando dispositivo [{device_index}] {info['name']}")
+    print(f"📌 Sample rate fijo: {rate} Hz, canales fijos: {channels}")
+
+    # Prepara carpeta de salida
+    out_dir = "recordings"
+    os.makedirs(out_dir, exist_ok=True)
+    print(f"\nLos WAV se guardarán en ./{out_dir}/")
+
+    # Bucle: ENTER para grabar, 'q' para salir
+    print("\nPulsa ENTER para grabar, o escribe 'q' + ENTER para salir.")
+    while True:
+        cmd = input(">> ")
+        if cmd.lower() == 'q':
+            break
+        if cmd == '':
+            ts    = time.strftime("%Y%m%d-%H%M%S")
+            fname = f"rec_{ts}.wav"
+            path  = os.path.join(out_dir, fname)
+            record_to_file(pa, device_index, rate, channels, path)
+
+    pa.terminate()
+    print("👋 ¡Adiós!")
+
+if __name__ == "__main__":
+    main()
+
+
+================================================
+File: /utils/test_realtime.py
+================================================
+import asyncio
+import websockets
+import json
+import pyaudio
+import base64
+import logging
+import os
+import ssl
+import threading
+import time
+
+from dotenv import load_dotenv
+load_dotenv()
+
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+
+INSTRUCTIONS = f"""
+You are a professional radio broadcaster. Provide a natural, broadcast-style answer. Answer in spanish from Spain. Use european format for all dates and units. Do not say nothing in your first message, say only: Voice real time mode started. Answer in short and concise sentences."""
+
+KEYBOARD_COMMANDS = """
+q: Quit
+t: Send text message
+a: Send audio message
+"""
+
+class AudioHandler:
+    """
+    Handles audio input and output using PyAudio.
+    """
+    def __init__(self):
+        self.p = pyaudio.PyAudio()
+        self.stream = None
+        self.audio_buffer = b''
+        self.chunk_size = 1024  # Number of audio frames per buffer
+        self.format = pyaudio.paInt16  # Audio format (16-bit PCM)
+        self.channels = 1  # Mono audio
+        self.rate = 24000  # Sampling rate in Hz
+        self.is_recording = False
+
+        # List audio input devices
+        logger.debug("Available audio input devices:")
+        for i in range(self.p.get_device_count()):
+            device_info = self.p.get_device_info_by_index(i)
+            if device_info['maxInputChannels'] > 0:
+                logger.debug(f"Input Device ID {i} - {device_info['name']}")
+
+    def start_audio_stream(self, input_device_index=None):
+        """
+        Start the audio input stream.
+        """
+        try:
+            self.stream = self.p.open(
+                format=self.format,
+                channels=self.channels,
+                rate=self.rate,
+                input=True,
+                frames_per_buffer=self.chunk_size,
+                input_device_index=input_device_index
+            )
+            logger.debug("Audio input stream started")
+        except Exception as e:
+            logger.error(f"Failed to open audio input stream: {e}")
+            self.stream = None
+
+    def stop_audio_stream(self):
+        """
+        Stop the audio input stream.
+        """
+        if self.stream:
+            self.stream.stop_stream()
+            self.stream.close()
+            logger.debug("Audio input stream stopped")
+            self.stream = None
+
+    def cleanup(self):
+        """
+        Clean up resources by stopping the stream and terminating PyAudio.
+        """
+        if self.stream:
+            self.stop_audio_stream()
+        self.p.terminate()
+        logger.debug("PyAudio terminated")
+
+    def start_recording(self):
+        """Start continuous recording"""
+        self.is_recording = True
+        self.audio_buffer = b''
+        self.start_audio_stream()
+
+    def stop_recording(self):
+        """Stop recording and return the recorded audio"""
+        self.is_recording = False
+        self.stop_audio_stream()
+        return self.audio_buffer
+
+    def record_chunk(self):
+        """Record a single chunk of audio"""
+        if self.stream and self.is_recording:
+            try:
+                data = self.stream.read(
+                    self.chunk_size,
+                    exception_on_overflow=False  # Okay to exceed buffer
+                )
+                self.audio_buffer += data
+                return data
+            except Exception as e:
+                logger.error(f"Error reading audio chunk: {e}")
+                return None
+        else:
+            logger.debug("Stream is not active or recording has stopped")
+        return None
+
+    def play_audio(self, audio_data):
+        """
+        Play audio data.
+        
+        :param audio_data: Received audio data (AI response)
+        """
+        def play():
+            try:
+                stream = self.p.open(
+                    format=self.format,
+                    channels=self.channels,
+                    rate=self.rate,
+                    output=True
+                )
+                stream.write(audio_data)
+                stream.stop_stream()
+                stream.close()
+            except Exception as e:
+                logger.error(f"Error playing audio: {e}")
+
+        logger.debug("Playing audio")
+        # Use a separate thread for playback to avoid blocking
+        playback_thread = threading.Thread(target=play)
+        playback_thread.start()
+
+class RealtimeClient:
+    """
+    Client for interacting with the OpenAI Realtime API via WebSocket.
+
+    Possible events: https://platform.openai.com/docs/api-reference/realtime-client-events
+    """
+    def __init__(self, instructions, voice="alloy"):
+        # WebSocket Configuration
+        self.url = "wss://api.openai.com/v1/realtime"  # WebSocket URL
+        self.model = "gpt-4o-mini-realtime-preview"
+        self.api_key = os.getenv("OPENAI_API_KEY")
+        self.ws = None
+        self.audio_handler = AudioHandler()
+        
+        # SSL Configuration (skipping certificate verification)
+        self.ssl_context = ssl.create_default_context()
+        self.ssl_context.check_hostname = False
+        self.ssl_context.verify_mode = ssl.CERT_NONE
+        
+        self.audio_buffer = b''  # Buffer for streaming audio responses
+        self.instructions = instructions
+        self.voice = voice
+
+        # VAD mode (set to None to disable server-side VAD)
+        self.session_config = {
+            "modalities": ["audio", "text"],
+            "instructions": self.instructions,
+            "voice": self.voice,
+            "input_audio_format": "pcm16",
+            "output_audio_format": "pcm16",
+            "turn_detection": None,
+            "input_audio_transcription": {
+                "model": "whisper-1"
+            },
+            "temperature": 0.6
+        }
+
+    async def connect(self):
+        """
+        Connect to the WebSocket server.
+        """
+        logger.info(f"Connecting to WebSocket: {self.url}")
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "OpenAI-Beta": "realtime=v1"
+        }
+        
+        # NEEDS websockets version < 14.0
+        self.ws = await websockets.connect(
+            f"{self.url}?model={self.model}",
+            extra_headers=headers,
+            ssl=self.ssl_context
+        )
+        logger.info("Successfully connected to OpenAI Realtime API")
+
+        # Configure session
+        await self.send_event(
+            {
+                "type": "session.update",
+                "session": self.session_config
+            }
+        )
+        logger.info("Session set up")
+
+        # Send a response.create event to initiate the conversation
+        await self.send_event({"type": "response.create"})
+        logger.debug("Sent response.create to initiate conversation")
+
+    async def send_event(self, event):
+        """
+        Send an event to the WebSocket server.
+        
+        :param event: Event data to send (from the user)
+        """
+        await self.ws.send(json.dumps(event))
+        logger.debug(f"Event sent - type: {event['type']}")
+
+    async def receive_events(self):
+        """
+        Continuously receive events from the WebSocket server.
+        """
+        try:
+            async for message in self.ws:
+                event = json.loads(message)
+                await self.handle_event(event)
+        except websockets.ConnectionClosed as e:
+            logger.error(f"WebSocket connection closed: {e}")
+        except Exception as e:
+            logger.error(f"An unexpected error occurred: {e}")
+
+    async def handle_event(self, event):
+        """
+        Handle incoming events from the WebSocket server.
+        Possible events: https://platform.openai.com/docs/api-reference/realtime-server-events
+        
+        :param event: Event data received (from the server).
+        """
+        event_type = event.get("type")
+        logger.debug(f"Received event type: {event_type}")
+
+        if event_type == "error":
+            logger.error(f"Error event received: {event['error']['message']}")
+        elif event_type == "response.text.delta":
+            # Print text response incrementally
+            print(event["delta"], end="", flush=True)
+        elif event_type == "response.audio.delta":
+            # Append audio data to buffer
+            audio_data = base64.b64decode(event["delta"])
+            self.audio_buffer += audio_data
+            logger.debug("Audio data appended to buffer")
+        elif event_type == "response.audio.done":
+            # Play the complete audio response
+            if self.audio_buffer:
+                self.audio_handler.play_audio(self.audio_buffer)
+                logger.info("Done playing audio response")
+                self.audio_buffer = b''
+            else:
+                logger.warning("No audio data to play")
+        elif event_type == "response.done":
+            logger.debug("Response generation completed")
+        elif event_type == "conversation.item.created":
+            logger.debug(f"Conversation item created: {event.get('item')}")
+        elif event_type == "input_audio_buffer.speech_started":
+            logger.debug("Speech started detected by server VAD")
+        elif event_type == "input_audio_buffer.speech_stopped":
+            logger.debug("Speech stopped detected by server VAD")
+        else:
+            logger.debug(f"Unhandled event type: {event_type}")
+
+    async def send_text(self, text):
+        """
+        Send a text message to the WebSocket server.
+        
+        :param text: Text message to send.
+        """
+        logger.info(f"Sending text message: {text}")
+        event = {
+            "type": "conversation.item.create",
+            "item": {
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": text
+                }]
+            }
+        }
+        await self.send_event(event)
+        await self.send_event({"type": "response.create"})
+        logger.debug(f"Sent text: {text}")
+
+    async def send_audio(self):
+        """
+        Record and send audio using manual turn detection.
+        """
+        logger.info("Starting audio recording. Press Enter to stop recording.")
+        self.audio_handler.start_recording()
+        
+        stop_recording = False
+
+        async def wait_for_enter():
+            nonlocal stop_recording
+            await asyncio.get_event_loop().run_in_executor(None, input)
+            stop_recording = True
+
+        try:
+            # Start the input listener
+            enter_task = asyncio.create_task(wait_for_enter())
+            while not stop_recording:
+                chunk = self.audio_handler.record_chunk()
+                if chunk:
+                    # Encode and send audio chunk
+                    base64_chunk = base64.b64encode(chunk).decode('utf-8')
+                    await self.send_event({
+                        "type": "input_audio_buffer.append",
+                        "audio": base64_chunk
+                    })
+                    await asyncio.sleep(0.01)
+                else:
+                    break
+
+            # Wait for enter_task to complete
+            await enter_task
+
+        except Exception as e:
+            logger.error(f"Error during audio recording: {e}")
+            self.audio_handler.stop_recording()
+            logger.debug("Audio recording stopped")
+
+        finally:
+            # Stop recording even if an exception occurs
+            self.audio_handler.stop_recording()
+            logger.debug("Audio recording stopped")
+        
+        # Commit the audio buffer and send response.create
+        # Must commit the buffer manually when not using server-side VAD
+        await self.send_event({"type": "input_audio_buffer.commit"})
+        logger.debug("Audio buffer committed")
+        await self.send_event({"type": "response.create"})
+        logger.debug("Sent response.create after committing audio buffer")
+
+    async def run(self):
+        """
+        Main loop to handle user input and interact with the WebSocket server.
+        """
+        await self.connect()
+        
+        # Continuously listen to events in the background
+        receive_task = asyncio.create_task(self.receive_events())
+
+        try:
+            while True:
+                # Get user command input
+                command = await asyncio.get_event_loop().run_in_executor(
+                    None, input, KEYBOARD_COMMANDS
+                )
+                if command == 'q':
+                    logger.info("Quit command received")
+                    break
+                elif command == 't':
+                    # Get text input from user
+                    text = await asyncio.get_event_loop().run_in_executor(
+                        None, input, "Enter TEXT message: "
+                    )
+                    await self.send_text(text)
+                elif command == 'a':
+                    # Record and send audio
+                    await self.send_audio()
+                await asyncio.sleep(0.1)
+        except Exception as e:
+            logger.error(f"An error occurred: {e}")
+        finally:
+            receive_task.cancel()
+            await self.cleanup()
+
+    async def cleanup(self):
+        """
+        Clean up resources by closing the WebSocket and audio handler.
+        """
+        self.audio_handler.cleanup()
+        if self.ws:
+            await self.ws.close()
+
+async def main():
+
+    client = RealtimeClient(
+        instructions=INSTRUCTIONS,
+        voice="ash"
+    )
+    try:
+        await client.run()
+    except Exception as e:
+        logger.error(f"An error occurred in main: {e}")
+    finally:
+        logger.info("Main done")
+
+if __name__ == "__main__":
+    asyncio.run(main())
 
 ================================================
 File: /agents.py
@@ -154,352 +966,561 @@ if __name__ == "__main__":
 ================================================
 File: /app.py
 ================================================
+#!/usr/bin/env python3
+"""
+Flask / Flask‑SocketIO server for STR – now using file_manager.py,
+plus clear‑history support and chat‑style layout.
+"""
+
+from __future__ import annotations
+
 import os
 import logging
-from flask import Flask, request, render_template, jsonify, send_from_directory
-from flask_socketio import SocketIO, emit
+
 from dotenv import load_dotenv
+from flask import (
+    Flask,
+    jsonify,
+    render_template,
+    request,
+    send_from_directory,
+)
+from flask_socketio import SocketIO, emit
 from elevenlabs import ElevenLabs
+from openai import OpenAI
+
 from agents import process_query
 from tts import generate_tts
 from realtime import RealtimeClient, INSTRUCTIONS
+from file_manager import PDFManager
 
-# Configure logging
+# ------------------------------------------------------------------#
+#  Config                                                           #
+# ------------------------------------------------------------------#
 logging.basicConfig(level=logging.INFO)
-
-# Load environment variables
 load_dotenv()
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+AUDIO_DIR = os.path.join(BASE_DIR, "audio_files")
+UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+
+os.makedirs(AUDIO_DIR, exist_ok=True)
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+# Keys
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 VOICE_ID = os.getenv("VOICE_ID")
 MODEL_ID = os.getenv("MODEL_ID")
+if not all([ELEVENLABS_API_KEY, VOICE_ID, MODEL_ID]):
+    raise RuntimeError("Missing ELEVENLABS_API_KEY, VOICE_ID or MODEL_ID")
 
-if not ELEVENLABS_API_KEY or not VOICE_ID or not MODEL_ID:
-    logging.error("Missing configuration in .env. Please set ELEVENLABS_API_KEY, VOICE_ID, and MODEL_ID.")
-    exit(1)
-
-# Set up audio directory
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-AUDIO_DIR = os.path.join(BASE_DIR, "audio_files")
-os.makedirs(AUDIO_DIR, exist_ok=True)
-
-# Initialize Flask app and ElevenLabs client
+# Flask + SocketIO
 app = Flask(__name__)
-client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
+socketio = SocketIO(app, cors_allowed_origins="*")
 
-# Initialize SocketIO
-socketio = SocketIO(app)
+eleven_client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
+openai_client = OpenAI()
 
-# Initialize RealtimeClient
-realtime_client = RealtimeClient(instructions=INSTRUCTIONS, voice="alloy")
+# PDF manager
+pdf_manager = PDFManager(UPLOAD_DIR)
 
-@app.route('/audio_files/<path:filename>')
+# Realtime (voice ash)
+def _broadcast(msg: str):
+    socketio.emit("broadcast_text", {"message": msg}, namespace="/realtime")
+
+
+realtime_client = RealtimeClient(
+    instructions=INSTRUCTIONS,
+    voice="ash",
+    mic_index=int(os.getenv("MIC_DEVICE_INDEX"))
+    if os.getenv("MIC_DEVICE_INDEX")
+    else None,
+    on_text=_broadcast,
+)
+
+# ------------------------------------------------------------------#
+#  Static / HTML                                                    #
+# ------------------------------------------------------------------#
+@app.route("/")
+def index():
+    return render_template("index.html")
+
+
+@app.route("/audio_files/<path:filename>")
 def serve_audio(filename):
     return send_from_directory(AUDIO_DIR, filename)
 
-@app.route('/')
-def index():
-    return render_template('index.html')
 
-@app.route('/api/tts', methods=['POST'])
+# ------------------------------------------------------------------#
+#  TTS                                                              #
+# ------------------------------------------------------------------#
+@app.route("/api/tts", methods=["POST"])
 def tts_endpoint():
-    data = request.get_json()
-    if not data or 'text' not in data:
-        return jsonify({'error': 'No text provided'}), 400
-    text = data['text']
-    logging.info(f"TTS request received: {text}")
-    try:
-        result = generate_tts(text, client, VOICE_ID, MODEL_ID, AUDIO_DIR)
-        audio_url = f"/audio_files/{result['mp3_filename']}"
-        return jsonify({
-            'message': result['message'],
-            'audio_url': audio_url
-        })
-    except Exception as e:
-        logging.exception("Error processing TTS request")
-        return jsonify({'error': str(e)}), 500
+    text = (request.get_json(silent=True) or {}).get("text", "").strip()
+    if not text:
+        return jsonify({"error": "No text provided"}), 400
+    res = generate_tts(text, eleven_client, VOICE_ID, MODEL_ID, AUDIO_DIR)
+    return jsonify(
+        {"message": res["message"], "audio_url": f"/audio_files/{res['mp3_filename']}"}
+    )
 
-@app.route('/api/agent', methods=['POST'])
+
+# ------------------------------------------------------------------#
+#  GPT Agent                                                        #
+# ------------------------------------------------------------------#
+@app.route("/api/agent", methods=["POST"])
 def agent_endpoint():
-    data = request.get_json()
-    if not data or 'query' not in data:
-        return jsonify({'error': 'No query provided'}), 400
-    query = data['query']
-    logging.info(f"Agent request received: {query}")
+    query = (request.get_json(silent=True) or {}).get("query", "").strip()
+    if not query:
+        return jsonify({"error": "No query provided"}), 400
+    answer = process_query(query)
+    res = generate_tts(answer, eleven_client, VOICE_ID, MODEL_ID, AUDIO_DIR)
+    return jsonify(
+        {"message": answer, "audio_url": f"/audio_files/{res['mp3_filename']}"}
+    )
+
+
+# ------------------------------------------------------------------#
+#  PDF – upload & ask                                               #
+# ------------------------------------------------------------------#
+@app.route("/api/pdf/upload", methods=["POST"])
+def pdf_upload():
     try:
-        broadcast_text = process_query(query)
-        logging.info(f"Broadcast text: {broadcast_text}")
-        result = generate_tts(broadcast_text, client, VOICE_ID, MODEL_ID, AUDIO_DIR)
-        audio_url = f"/audio_files/{result['mp3_filename']}"
-        return jsonify({
-            'message': broadcast_text,
-            'audio_url': audio_url
-        })
-    except Exception as e:
-        logging.exception("Error processing agent request")
-        return jsonify({'error': str(e)}), 500
+        info = pdf_manager.upload(request.files.get("file"))
+        return jsonify(info)
+    except Exception as exc:  # noqa: BLE001
+        logging.exception("PDF upload failed")
+        return jsonify({"error": str(exc)}), 400
 
-@socketio.on('connect', namespace='/realtime')
-def handle_realtime_connect():
-    emit('status', {'message': 'Connected to real-time namespace'})
 
-@socketio.on('audio_chunk', namespace='/realtime')
-def handle_audio_chunk(data):
-    realtime_client.send_audio_chunk(data)
+@app.route("/api/pdf/ask", methods=["POST"])
+def pdf_ask():
+    data = request.get_json(silent=True) or {}
+    question = data.get("question", "").strip()
+    filename = data.get("filename")
+    if not question or not filename:
+        return jsonify({"error": "Invalid request"}), 400
+    try:
+        answer = pdf_manager.ask(filename, question)
+    except Exception as exc:  # noqa: BLE001
+        logging.exception("PDF ask error")
+        return jsonify({"error": str(exc)}), 400
+    res = generate_tts(answer, eleven_client, VOICE_ID, MODEL_ID, AUDIO_DIR)
+    return jsonify(
+        {"answer": answer, "audio_url": f"/audio_files/{res['mp3_filename']}"}
+    )
 
-@socketio.on('stop_talking', namespace='/realtime')
-def handle_stop_talking():
-    realtime_client.commit_and_respond()
 
-if __name__ == '__main__':
+# ------------------------------------------------------------------#
+#  SocketIO – realtime                                              #
+# ------------------------------------------------------------------#
+@socketio.on("connect", namespace="/realtime")
+def rt_connect():
+    emit("status", {"message": "Ready"})
+
+
+@socketio.on("start_talking", namespace="/realtime")
+def rt_start():
+    realtime_client.start_talking()
+    emit("status", {"message": "Recording…"})
+
+
+@socketio.on("stop_talking", namespace="/realtime")
+def rt_stop():
+    realtime_client.stop_talking()
+    emit("status", {"message": "Processing…"})
+
+
+@socketio.on("send_text", namespace="/realtime")
+def rt_send_text(data):
+    text = (data or {}).get("text", "").strip()
+    if text:
+        realtime_client.send_text(text)
+
+
+# ------------------------------------------------------------------#
+#  Main                                                             #
+# ------------------------------------------------------------------#
+if __name__ == "__main__":
     socketio.run(app, host="0.0.0.0", port=5000, debug=True)
+
 
 ================================================
 File: /templates/index.html
 ================================================
 <!DOCTYPE html>
-<html>
+<html lang="es">
   <head>
     <meta charset="UTF-8" />
     <title>STR Proyecto</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.4/socket.io.js"></script>
+  </head>
+  <body class="bg-gray-50 text-gray-900">
+    <div class="max-w-4xl mx-auto py-8 flex flex-col gap-6">
+      <!-- Title -->
+      <h1 class="text-3xl font-bold text-center">📡 Proyecto STR</h1>
+
+      <!-- Tabs -->
+      <nav class="flex gap-4 border-b pb-2" id="tabs">
+        <button data-tab="tts" class="tab active">TTS</button>
+        <button data-tab="agent" class="tab">Agent</button>
+        <button data-tab="realtime" class="tab">Realtime</button>
+        <button data-tab="pdf" class="tab">PDF</button>
+      </nav>
+
+      <!-- Panels -->
+      <!-- ------------ TTS ------------- -->
+      <section id="panel-tts" class="panel flex flex-col gap-4">
+        <div id="ttsFeed" class="feed"></div>
+
+        <div class="flex flex-col gap-2">
+          <textarea
+            id="ttsInput"
+            class="input-box"
+            placeholder="Escribe texto…"
+          ></textarea>
+          <div class="flex gap-2">
+            <button id="ttsSend" class="btn-primary">Enviar</button>
+            <button id="ttsClear" class="btn-secondary">Limpiar</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ------------ Agent ----------- -->
+      <section id="panel-agent" class="panel hidden flex flex-col gap-4">
+        <div id="agentFeed" class="feed"></div>
+
+        <div class="flex flex-col gap-2">
+          <textarea
+            id="agentInput"
+            class="input-box"
+            placeholder="Pregunta…"
+          ></textarea>
+          <div class="flex gap-2">
+            <button id="agentSend" class="btn-primary">Enviar</button>
+            <button id="agentClear" class="btn-secondary">Limpiar</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- -------- Realtime ------------ -->
+      <section id="panel-realtime" class="panel hidden flex flex-col gap-4">
+        <div id="realtimeFeed" class="feed"></div>
+
+        <div class="flex flex-col gap-4">
+          <div class="flex gap-2">
+            <button id="startTalking" class="btn-primary">🎙️ Start</button>
+            <button id="stopTalking" class="btn-secondary" disabled>
+              ⏹️ Stop
+            </button>
+            <button id="rtClear" class="btn-secondary">Limpiar</button>
+          </div>
+
+          <div class="flex gap-2">
+            <input
+              id="realtimeText"
+              class="input-box flex-grow"
+              placeholder="Enviar texto al aire…"
+            />
+            <button id="realtimeTextSend" class="btn-primary">Enviar</button>
+          </div>
+          <p id="realtimeStatus" class="text-sm text-gray-600"></p>
+        </div>
+      </section>
+
+      <!-- ------------- PDF ------------ -->
+      <section id="panel-pdf" class="panel hidden flex flex-col gap-4">
+        <div id="pdfFeed" class="feed"></div>
+
+        <div class="flex flex-col gap-2">
+          <input type="file" id="pdfFile" accept="application/pdf" />
+          <div class="flex gap-2">
+            <button id="pdfUpload" class="btn-primary">Subir</button>
+            <button id="pdfClear" class="btn-secondary">Limpiar</button>
+          </div>
+          <p id="pdfUploadStatus" class="text-sm text-gray-600"></p>
+
+          <input
+            id="pdfQuestion"
+            class="input-box"
+            placeholder="Pregunta sobre tu PDF…"
+            disabled
+          />
+          <button id="pdfAsk" class="btn-primary w-max" disabled>
+            Preguntar
+          </button>
+        </div>
+      </section>
+    </div>
+
     <style>
-      body {
-        font-family: Arial, sans-serif;
-        margin: 0;
-        padding: 0;
-        background: #f7f7f7;
-      }
-      .container {
-        max-width: 800px;
-        margin: 20px auto;
-      }
       .tab {
-        overflow: hidden;
-        background-color: #333;
+        padding: 0.5rem 1rem;
+        border-bottom: 2px solid transparent;
       }
-      .tab button {
-        background-color: inherit;
-        border: none;
-        outline: none;
-        cursor: pointer;
-        padding: 14px 16px;
-        transition: 0.3s;
-        font-size: 17px;
-        color: white;
+      .tab.active {
+        border-color: rgb(29 78 216);
+        color: rgb(29 78 216);
+        font-weight: 600;
       }
-      .tab button:hover {
-        background-color: #575757;
-      }
-      .tab button.active {
-        background-color: #575757;
-      }
-      .tabcontent {
-        display: none;
-        padding: 20px;
-        background-color: #fff;
-      }
-      textarea {
-        width: 100%;
-        padding: 10px;
-        font-size: 16px;
+      .input-box {
+        padding: 0.5rem;
         border: 1px solid #ccc;
-        border-radius: 4px;
-        resize: vertical;
-        min-height: 100px;
+        border-radius: 0.375rem;
       }
-      button.submit-btn {
-        margin-top: 10px;
-        padding: 10px 20px;
-        font-size: 16px;
-        border: none;
-        border-radius: 4px;
-        background-color: #007bff;
-        color: white;
-        cursor: pointer;
+      .feed {
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+        max-height: 400px;
+        overflow-y: auto;
       }
-      button.submit-btn:hover {
-        background-color: #0056b3;
+      .bubble {
+        padding: 0.75rem 1rem;
+        border-radius: 0.5rem;
+        max-width: 80%;
       }
-      .result {
-        margin-top: 20px;
-        padding: 10px;
-        border-top: 1px solid #ccc;
+      .user {
+        background: #e0f2fe;
+        align-self: flex-end;
+      }
+      .bot {
+        background: #f1f5f9;
+        align-self: flex-start;
+      }
+      .btn-primary {
+        background: rgb(29 78 216);
+        color: #fff;
+        padding: 0.5rem 1rem;
+        border-radius: 0.375rem;
+      }
+      .btn-primary:hover {
+        background: rgb(30 64 175);
+      }
+      .btn-secondary {
+        background: rgb(75 85 99);
+        color: #fff;
+        padding: 0.5rem 1rem;
+        border-radius: 0.375rem;
+      }
+      .btn-secondary:hover {
+        background: rgb(55 65 81);
       }
       audio {
         width: 100%;
-        margin-top: 10px;
+        margin-top: 0.5rem;
       }
     </style>
-  </head>
-  <body>
-    <div class="container">
-      <div class="tab">
-        <button
-          class="tablinks"
-          onclick="openTab(event, 'TTS')"
-          id="defaultTab"
-        >
-          Text-to-Speech
-        </button>
-        <button class="tablinks" onclick="openTab(event, 'Agent')">
-          Agent Query
-        </button>
-        <button class="tablinks" onclick="openTab(event, 'Realtime')">
-          Real-time Speech-to-Speech
-        </button>
-      </div>
 
-      <div id="TTS" class="tabcontent">
-        <h2>Text-to-Speech</h2>
-        <textarea
-          id="ttsInput"
-          placeholder="Enter text to convert to speech..."
-        ></textarea>
-        <br />
-        <button class="submit-btn" onclick="sendTTSRequest()">Submit</button>
-        <div id="ttsResult"></div>
-      </div>
-
-      <div id="Agent" class="tabcontent">
-        <h2>Agent Query</h2>
-        <textarea id="agentInput" placeholder="Enter your query..."></textarea>
-        <br />
-        <button class="submit-btn" onclick="sendAgentRequest()">Submit</button>
-        <div id="agentResult"></div>
-      </div>
-
-      <div id="Realtime" class="tabcontent">
-        <h2>Real-time Speech-to-Speech</h2>
-        <button id="startTalking">Start Talking</button>
-        <button id="stopTalking" disabled>Stop Talking</button>
-        <div id="realtimeStatus"></div>
-      </div>
-    </div>
-
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.1/socket.io.js"></script>
     <script>
       const socket = io("/realtime");
+      const el = (sel) => document.querySelector(sel);
+      const feedClear = (sel) => {
+        el(sel).innerHTML = "";
+      };
 
-      let audioContext;
-      let scriptProcessor;
-      let inputStream;
+      const appendBubble = (feedSel, text, who, audioUrl) => {
+        const div = document.createElement("div");
+        div.className = `bubble ${who}`;
+        div.innerHTML =
+          `<p>${text}</p>` +
+          (audioUrl ? `<audio controls src="${audioUrl}"></audio>` : "");
+        el(feedSel).appendChild(div);
+        div.scrollIntoView({ behavior: "smooth" });
+      };
 
-      document
-        .getElementById("startTalking")
-        .addEventListener("click", async () => {
-          try {
-            const audioStream = await navigator.mediaDevices.getUserMedia({
-              audio: true,
-            });
-            audioContext = new AudioContext({ sampleRate: 24000 });
-            inputStream = audioContext.createMediaStreamSource(audioStream);
-            scriptProcessor = audioContext.createScriptProcessor(1024, 1, 1);
-            scriptProcessor.onaudioprocess = (event) => {
-              const inputBuffer = event.inputBuffer.getChannelData(0);
-              const int16Buffer = new Int16Array(inputBuffer.length);
-              for (let i = 0; i < inputBuffer.length; i++) {
-                int16Buffer[i] =
-                  Math.max(-1, Math.min(1, inputBuffer[i])) * 0x7fff;
-              }
-              socket.emit("audio_chunk", int16Buffer.buffer);
-            };
-            inputStream.connect(scriptProcessor);
-            scriptProcessor.connect(audioContext.destination);
-            document.getElementById("startTalking").disabled = true;
-            document.getElementById("stopTalking").disabled = false;
-            document.getElementById("realtimeStatus").innerText =
-              "Recording...";
-          } catch (err) {
-            console.error("Error accessing microphone:", err);
-          }
+      /* ---------- tabs ---------- */
+      document.querySelectorAll("#tabs .tab").forEach((btn) => {
+        btn.onclick = () => {
+          document
+            .querySelectorAll("#tabs .tab")
+            .forEach((b) => b.classList.remove("active"));
+          btn.classList.add("active");
+          document
+            .querySelectorAll(".panel")
+            .forEach((p) => p.classList.add("hidden"));
+          el(`#panel-${btn.dataset.tab}`).classList.remove("hidden");
+        };
+      });
+
+      /* ---------- TTS ---------- */
+      el("#ttsSend").onclick = async () => {
+        const txt = el("#ttsInput").value.trim();
+        if (!txt) return;
+        appendBubble("#ttsFeed", txt, "user");
+        el("#ttsInput").value = "";
+        const r = await fetch("/api/tts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: txt }),
         });
+        const j = await r.json();
+        if (r.ok) appendBubble("#ttsFeed", j.message, "bot", j.audio_url);
+        else alert(j.error);
+      };
+      el("#ttsClear").onclick = () => feedClear("#ttsFeed");
 
-      document.getElementById("stopTalking").addEventListener("click", () => {
-        if (scriptProcessor) {
-          scriptProcessor.disconnect();
-          inputStream.disconnect();
-          audioContext.close();
-          socket.emit("stop_talking");
-          document.getElementById("startTalking").disabled = false;
-          document.getElementById("stopTalking").disabled = true;
-          document.getElementById("realtimeStatus").innerText = "Processing...";
-        }
-      });
+      /* ---------- Agent ---------- */
+      el("#agentSend").onclick = async () => {
+        const q = el("#agentInput").value.trim();
+        if (!q) return;
+        appendBubble("#agentFeed", q, "user");
+        el("#agentInput").value = "";
+        const r = await fetch("/api/agent", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query: q }),
+        });
+        const j = await r.json();
+        if (r.ok) appendBubble("#agentFeed", j.message, "bot", j.audio_url);
+        else alert(j.error);
+      };
+      el("#agentClear").onclick = () => feedClear("#agentFeed");
 
-      socket.on("status", (data) => {
-        console.log("Status:", data.message);
-      });
+      /* ---------- Realtime mic+text ---------- */
+      el("#startTalking").onclick = () => {
+        socket.emit("start_talking");
+        el("#startTalking").disabled = true;
+        el("#stopTalking").disabled = false;
+      };
+      el("#stopTalking").onclick = () => {
+        socket.emit("stop_talking");
+        el("#stopTalking").disabled = true;
+        el("#startTalking").disabled = false;
+      };
+      el("#realtimeTextSend").onclick = () => {
+        const msg = el("#realtimeText").value.trim();
+        if (!msg) return;
+        appendBubble("#realtimeFeed", msg, "user");
+        el("#realtimeText").value = "";
+        socket.emit("send_text", { text: msg });
+      };
+      el("#rtClear").onclick = () => feedClear("#realtimeFeed");
+      socket.on(
+        "status",
+        (d) => (el("#realtimeStatus").textContent = d.message)
+      );
+      socket.on("broadcast_text", (d) =>
+        appendBubble("#realtimeFeed", d.message, "bot")
+      );
 
-      function openTab(evt, tabName) {
-        var i, tabcontent, tablinks;
-        tabcontent = document.getElementsByClassName("tabcontent");
-        for (i = 0; i < tabcontent.length; i++) {
-          tabcontent[i].style.display = "none";
-        }
-        tablinks = document.getElementsByClassName("tablinks");
-        for (i = 0; i < tablinks.length; i++) {
-          tablinks[i].className = tablinks[i].className.replace(" active", "");
-        }
-        document.getElementById(tabName).style.display = "block";
-        evt.currentTarget.className += " active";
-      }
-      document.getElementById("defaultTab").click();
-
-      async function sendTTSRequest() {
-        const text = document.getElementById("ttsInput").value.trim();
-        if (!text) {
-          alert("Please enter text for TTS.");
+      /* ---------- PDF ---------- */
+      let currentPDF = null;
+      el("#pdfUpload").onclick = async () => {
+        const f = el("#pdfFile").files[0];
+        if (!f) {
+          alert("Elige un PDF");
           return;
         }
-        try {
-          const response = await fetch("/api/tts", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text: text }),
-          });
-          const result = await response.json();
-          if (response.ok) {
-            let resultDiv = document.getElementById("ttsResult");
-            let html = `<p>${result.message}</p>`;
-            html += `<audio controls src="${result.audio_url}"></audio>`;
-            resultDiv.innerHTML = html;
-            document.getElementById("ttsInput").value = "";
-          } else {
-            alert("Error: " + result.error);
-          }
-        } catch (err) {
-          alert("Error connecting to server: " + err);
+        const fd = new FormData();
+        fd.append("file", f);
+        el("#pdfUploadStatus").textContent = "Subiendo…";
+        const r = await fetch("/api/pdf/upload", { method: "POST", body: fd });
+        const j = await r.json();
+        if (r.ok) {
+          currentPDF = j.filename;
+          el("#pdfUploadStatus").textContent = `PDF cargado: ${currentPDF}`;
+          el("#pdfQuestion").disabled = false;
+          el("#pdfAsk").disabled = false;
+        } else {
+          alert(j.error);
+          el("#pdfUploadStatus").textContent = "";
         }
-      }
-
-      async function sendAgentRequest() {
-        const query = document.getElementById("agentInput").value.trim();
-        if (!query) {
-          alert("Please enter a query.");
-          return;
-        }
-        try {
-          const response = await fetch("/api/agent", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ query: query }),
-          });
-          const result = await response.json();
-          if (response.ok) {
-            let resultDiv = document.getElementById("agentResult");
-            let html = `<p>${result.message}</p>`;
-            html += `<audio controls src="${result.audio_url}"></audio>`;
-            resultDiv.innerHTML = html;
-            document.getElementById("agentInput").value = "";
-          } else {
-            alert("Error: " + result.error);
-          }
-        } catch (err) {
-          alert("Error connecting to server: " + err);
-        }
-      }
+      };
+      el("#pdfAsk").onclick = async () => {
+        const q = el("#pdfQuestion").value.trim();
+        if (!q || !currentPDF) return;
+        appendBubble("#pdfFeed", q, "user");
+        el("#pdfQuestion").value = "";
+        const r = await fetch("/api/pdf/ask", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question: q, filename: currentPDF }),
+        });
+        const j = await r.json();
+        if (r.ok) appendBubble("#pdfFeed", j.answer, "bot", j.audio_url);
+        else alert(j.error);
+      };
+      el("#pdfClear").onclick = () => feedClear("#pdfFeed");
     </script>
   </body>
 </html>
+
+
+================================================
+File: /file_manager.py
+================================================
+#!/usr/bin/env python3
+"""
+PDF upload + question‑answering logic, isolated from the Flask app.
+
+• Uploads a PDF to the OpenAI Files endpoint and keeps the mapping
+  filename → file_id in memory (could be persisted if needed).
+• Answers questions with the File‑search tool (beta) following:
+  https://platform.openai.com/docs/guides/pdf-files
+"""
+
+from __future__ import annotations
+
+import os
+import logging
+from typing import Dict
+
+from openai import OpenAI
+
+log = logging.getLogger(__name__)
+
+
+class PDFManager:
+    """Simple in‑memory PDF store."""
+
+    def __init__(self, upload_dir: str):
+        self.upload_dir = upload_dir
+        os.makedirs(self.upload_dir, exist_ok=True)
+        self.client = OpenAI()
+        self._store: Dict[str, str] = {}  # filename → file_id
+
+    # ------------------------------------------------------------------#
+    #  Upload                                                           #
+    # ------------------------------------------------------------------#
+    def upload(self, werkzeug_file) -> dict:
+        """
+        Save PDF locally and upload to OpenAI. Returns dict with {file_id, filename}.
+        """
+        if not werkzeug_file or not werkzeug_file.filename.lower().endswith(".pdf"):
+            raise ValueError("A PDF file is required.")
+
+        save_path = os.path.join(self.upload_dir, werkzeug_file.filename)
+        werkzeug_file.save(save_path)
+
+        with open(save_path, "rb") as f:
+            openai_file = self.client.files.create(file=f, purpose="assistants")
+
+        self._store[werkzeug_file.filename] = openai_file.id
+        log.info("PDF uploaded: %s → %s", werkzeug_file.filename, openai_file.id)
+        return {"file_id": openai_file.id, "filename": werkzeug_file.filename}
+
+    # ------------------------------------------------------------------#
+    #  Ask                                                              #
+    # ------------------------------------------------------------------#
+    def ask(self, filename: str, question: str) -> str:
+        """
+        Query the uploaded PDF with file_search tool and return the text answer.
+        """
+        if filename not in self._store:
+            raise ValueError("File not found. Upload first.")
+
+        file_id = self._store[filename]
+
+        completion = self.client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=[{"role": "user", "content": question}],
+            tools=[{"type": "file_search"}],
+            file_ids=[file_id],
+        )
+        answer = completion.choices[0].message.content
+        log.debug("PDF answer: %s", answer)
+        return answer
 
 
