@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Flask / Flask‑SocketIO server for STR – now using file_manager.py,
-plus clear‑history support and chat‑style layout.
+Flask / Flask‑SocketIO server for STR.
 """
 
 from __future__ import annotations
@@ -25,6 +24,7 @@ from agents import process_query
 from tts import generate_tts
 from realtime import RealtimeClient, INSTRUCTIONS
 from file_manager import PDFManager
+from config import MIC_DEVICE_INDEX   # <<<<<< NEW
 
 # ------------------------------------------------------------------#
 #  Config                                                           #
@@ -39,24 +39,24 @@ UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 os.makedirs(AUDIO_DIR, exist_ok=True)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# Keys
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 VOICE_ID = os.getenv("VOICE_ID")
 MODEL_ID = os.getenv("MODEL_ID")
 if not all([ELEVENLABS_API_KEY, VOICE_ID, MODEL_ID]):
-    raise RuntimeError("Missing ELEVENLABS_API_KEY, VOICE_ID or MODEL_ID")
+    raise RuntimeError("Missing ELEVENLABS_API_KEY, VOICE_ID, MODEL_ID")
 
-# Flask + SocketIO
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
 eleven_client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
 openai_client = OpenAI()
 
-# PDF manager
 pdf_manager = PDFManager(UPLOAD_DIR)
 
-# Realtime (voice ash)
+
+# ------------------------------------------------------------------#
+#  Realtime client                                                  #
+# ------------------------------------------------------------------#
 def _broadcast(msg: str):
     socketio.emit("broadcast_text", {"message": msg}, namespace="/realtime")
 
@@ -64,11 +64,11 @@ def _broadcast(msg: str):
 realtime_client = RealtimeClient(
     instructions=INSTRUCTIONS,
     voice="ash",
-    mic_index=int(os.getenv("MIC_DEVICE_INDEX"))
-    if os.getenv("MIC_DEVICE_INDEX")
-    else None,
+    mic_index=MIC_DEVICE_INDEX,      # <<<<<< NEW
     on_text=_broadcast,
 )
+
+
 
 # ------------------------------------------------------------------#
 #  Static / HTML                                                    #
