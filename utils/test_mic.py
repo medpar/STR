@@ -16,7 +16,7 @@ def wait_for_enter():
     stop_flag = True
 
 def record_to_file(pa, device_index, rate, channels, out_path):
-    """Graba audio hasta que se pulse ENTER y lo guarda en out_path,
+    """Graba audio hasta que se pulse ENTER de nuevo y lo guarda en out_path,
     aplicando normalización para subir el volumen."""
     global stop_flag
     stop_flag = False
@@ -40,7 +40,6 @@ def record_to_file(pa, device_index, rate, channels, out_path):
             data = stream.read(1024, exception_on_overflow=False)
             frames.append(data)
         except OSError as e:
-            # Ignorar overflow y seguir grabando
             print(f"[Warning] overflow: {e}")
 
     t.join()
@@ -60,7 +59,7 @@ def record_to_file(pa, device_index, rate, channels, out_path):
     else:
         print("⚠️ Atención: no se detectó audio.")
 
-    # Guarda el WAV
+    # Guarda el WAV con la frecuencia correcta en el header
     wf = wave.open(out_path, 'wb')
     wf.setnchannels(channels)
     wf.setsampwidth(pa.get_sample_size(pyaudio.paInt16))
@@ -72,38 +71,31 @@ def record_to_file(pa, device_index, rate, channels, out_path):
 def main():
     pa = pyaudio.PyAudio()
 
-    # 1) Lista dispositivos de entrada
-    print("Dispositivos de entrada disponibles:")
-    for i in range(pa.get_device_count()):
-        info = pa.get_device_info_by_index(i)
-        if info["maxInputChannels"] > 0:
-            print(f"  [{i}] {info['name']}")
+    # --- Parámetros fijos ---
+    device_index = 1           # ID del mic USB por defecto
+    rate         = 44100       # forzamos 44.1 kHz para evitar aceleración
+    channels     = 1           # mono
 
-    # 2) Elige dispositivo (el mic USB)
-    dev = int(input("\nIntroduce el ID de tu micrófono USB: "))
+    info = pa.get_device_info_by_index(device_index)
+    print(f"📌 Usando dispositivo [{device_index}] {info['name']}")
+    print(f"📌 Sample rate fijo: {rate} Hz, canales fijos: {channels}")
 
-    # 3) Usa parámetros por defecto del dispositivo
-    info = pa.get_device_info_by_index(dev)
-    rate = int(info["defaultSampleRate"])
-    channels = int(info["maxInputChannels"])
-    print(f"\nUsando {rate} Hz y {channels} canal(es) por defecto para ese dispositivo.")
-
-    # 4) Prepara carpeta de salida
+    # Prepara carpeta de salida
     out_dir = "recordings"
     os.makedirs(out_dir, exist_ok=True)
     print(f"\nLos WAV se guardarán en ./{out_dir}/")
 
-    # 5) Bucle: ENTER para grabar, 'q' para salir
+    # Bucle: ENTER para grabar, 'q' para salir
     print("\nPulsa ENTER para grabar, o escribe 'q' + ENTER para salir.")
     while True:
         cmd = input(">> ")
         if cmd.lower() == 'q':
             break
         if cmd == '':
-            ts = time.strftime("%Y%m%d-%H%M%S")
+            ts    = time.strftime("%Y%m%d-%H%M%S")
             fname = f"rec_{ts}.wav"
-            path = os.path.join(out_dir, fname)
-            record_to_file(pa, dev, rate, channels, path)
+            path  = os.path.join(out_dir, fname)
+            record_to_file(pa, device_index, rate, channels, path)
 
     pa.terminate()
     print("👋 ¡Adiós!")
