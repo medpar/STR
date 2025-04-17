@@ -2,8 +2,7 @@
 import os
 import time
 import threading
-import pyaudio
-import wave
+import subprocess
 
 # Flag para detener la grabación
 stop_flag = False
@@ -11,71 +10,50 @@ stop_flag = False
 def wait_for_enter():
     """Espera a que el usuario pulse ENTER y marca stop_flag."""
     global stop_flag
-    input()  # bloquea hasta ENTER
+    input()
     stop_flag = True
 
-def record_to_file(pa, device_index, rate, channels, out_path):
-    """Graba audio hasta que se pulse ENTER de nuevo y lo guarda en out_path."""
+def record_to_file(device, out_path):
+    """Lanza arecord hasta que se pulse ENTER y guarda en out_path."""
     global stop_flag
     stop_flag = False
 
-    stream = pa.open(format=pyaudio.paInt16,
-                     channels=channels,
-                     rate=rate,
-                     input=True,
-                     frames_per_buffer=1024,
-                     input_device_index=device_index)
+    # Comando arecord: dispositivo, formato CD (44.1kHz, 16bit, stereo), WAV
+    cmd = [
+        "arecord",
+        "-D", device,
+        "-f", "cd",
+        "-t", "wav",
+        out_path
+    ]
+    print(f"\n🔴 Grabando con arecord en {device}… pulsa ENTER para parar.")
+    proc = subprocess.Popen(cmd)
 
-    frames = []
-    print("\n🔴 Grabando... pulsa ENTER para parar.")
-
-    # Arranca hilo que espera el ENTER
+    # Hilo que espera ENTER
     t = threading.Thread(target=wait_for_enter)
     t.start()
 
-    # Lee fragmentos hasta que stop_flag sea True
+    # Mantén el proceso hasta que stop_flag sea True
     while not stop_flag:
-        try:
-            data = stream.read(1024, exception_on_overflow=False)
-            frames.append(data)
-        except OSError as e:
-            # Si ocurre overflow, lo ignoramos y seguimos
-            print(f"[Warning] overflow: {e}")
+        time.sleep(0.1)
 
+    # Detén arecord
+    proc.terminate()
+    proc.wait()
     t.join()
-    stream.stop_stream()
-    stream.close()
 
-    # Escribe el fichero WAV
-    wf = wave.open(out_path, 'wb')
-    wf.setnchannels(channels)
-    wf.setsampwidth(pa.get_sample_size(pyaudio.paInt16))
-    wf.setframerate(rate)
-    wf.writeframes(b''.join(frames))
-    wf.close()
     print(f"✅ Guardado → {out_path}\n")
 
 def main():
-    pa = pyaudio.PyAudio()
+    # 1) Dispositivo ALSA (por defecto plughw:1,0)
+    device = input("Dispositivo ALSA [plughw:1,0]: ").strip() or "plughw:1,0"
 
-    # 1) Listar dispositivos de entrada
-    print("Dispositivos de entrada disponibles:")
-    for i in range(pa.get_device_count()):
-        dev = pa.get_device_info_by_index(i)
-        if dev["maxInputChannels"] > 0:
-            print(f"  [{i}] {dev['name']}  (canales: {dev['maxInputChannels']})")
-
-    # 2) Elegir dispositivo, sample rate y canales
-    dev = int(input("\nIntroduce el ID de tu micrófono USB: "))
-    rate = int(input("Sample rate (Hz) [44100]: ") or 44100)
-    chans = int(input("Canales [1]: ") or 1)
-
-    # 3) Carpeta de salida
+    # 2) Carpeta de salida
     out_dir = "recordings"
     os.makedirs(out_dir, exist_ok=True)
     print(f"\nLos WAV se guardarán en ./{out_dir}/")
 
-    # 4) Bucle principal: ENTER para grabar, 'q' para salir
+    # 3) Bucle principal: ENTER para grabar, 'q' para salir
     print("\nPulsa ENTER para grabar, o escribe 'q' + ENTER para salir.")
     while True:
         cmd = input(">> ")
@@ -85,9 +63,8 @@ def main():
             timestamp = time.strftime("%Y%m%d-%H%M%S")
             filename = f"rec_{timestamp}.wav"
             path = os.path.join(out_dir, filename)
-            record_to_file(pa, dev, rate, chans, path)
+            record_to_file(device, path)
 
-    pa.terminate()
     print("👋 ¡Adiós!")
 
 if __name__ == "__main__":
