@@ -11,7 +11,7 @@ import os
 #  Audio                                                      #
 # ------------------------------------------------------------#
 MIC_DEVICE_INDEX: int = int(os.getenv("MIC_DEVICE_INDEX", "1"))
-SAMPLE_RATE: int = int(os.getenv("MIC_SAMPLE_RATE", "24000"))   # 24000, 44100, 48000 …
+SAMPLE_RATE: int = int(os.getenv("MIC_SAMPLE_RATE", "48000"))   # 24000, 44100, 48000 …
 NUM_CHANNELS: int = int(os.getenv("MIC_CHANNELS", "1"))
 FRAME_CHUNK: int = int(os.getenv("MIC_CHUNK", "1024"))
 

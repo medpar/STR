@@ -1,83 +1,80 @@
 #!/usr/bin/env python3
 """
-Test script to verify USB mic recording + LED + button wiring
-without running the whole Flask app.
+Press the button on GPIO17 to start/stop recording.
+The LED on GPIO27 is lit while recording.
+A WAV is written to ./recordings/rec_YYYYMMDD‑HHMMSS.wav
 
-• Press the push‑button (GPIO17) or hit ENTER in the console to start
-  recording. LED (GPIO27) lights while recording.
-• Press the button again (or ENTER) to stop – WAV is written to ./recordings/.
+Playback speed is now correct (48 kHz by default, change in config.py).
 """
 
-import os, time, threading, wave, logging
-import numpy as np, pyaudio
-import sys
-from pathlib import Path
-sys.path.append(str(Path(__file__).parent.parent))
-from config import (
-    MIC_DEVICE_INDEX, SAMPLE_RATE, FRAME_CHUNK, NUM_CHANNELS,
-    NORMALISE_INPUT, GPIO_BUTTON_PIN, GPIO_LED_PIN,
-)
+import os, time, wave, threading
+import numpy as np, pyaudio, RPi.GPIO as GPIO         # pip install numpy
 
-try:
-    from gpiozero import Button, LED
-    _gpio = True
-except (ImportError, RuntimeError):
-    _gpio = False
-    Button = LED = None  # type: ignore
+from config import SAMPLE_RATE, NUM_CHANNELS, FRAME_CHUNK, \
+                   MIC_DEVICE_INDEX, GPIO_BUTTON_PIN, GPIO_LED_PIN
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
-log = logging.getLogger("test_mic_led")
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(GPIO_BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+GPIO.setup(GPIO_LED_PIN,    GPIO.OUT, initial=GPIO.LOW)
 
-# -------- Audio helpers ---------- #
 pa = pyaudio.PyAudio()
-fmt = pyaudio.paInt16
+stream = None
+frames = []
+recording = False
+lock = threading.Lock()
 
-def normalise(raw:bytes)->bytes:
-    if not NORMALISE_INPUT: return raw
-    pcm=np.frombuffer(raw,np.int16); peak=np.max(np.abs(pcm)) or 1
-    gain=int(0.9*32767/peak)
-    if gain>1: pcm=np.clip(pcm*gain,-32768,32767).astype(np.int16)
-    return pcm.tobytes()
+def toggle(channel):
+    global stream, frames, recording
+    with lock:
+        if not recording:
+            # --- start ---
+            stream = pa.open(format=pyaudio.paInt16, channels=NUM_CHANNELS,
+                             rate=SAMPLE_RATE, input=True,
+                             frames_per_buffer=FRAME_CHUNK,
+                             input_device_index=MIC_DEVICE_INDEX)
+            frames = []
+            recording = True
+            GPIO.output(GPIO_LED_PIN, GPIO.HIGH)
+            print("🔴 REC…  (press again to stop)")
+            threading.Thread(target=capture_loop, daemon=True).start()
+        else:
+            # --- stop ---
+            recording = False
+            GPIO.output(GPIO_LED_PIN, GPIO.LOW)
+            stream.stop_stream(); stream.close()
+            ts = time.strftime("%Y%m%d-%H%M%S")
+            path = f"recordings/rec_{ts}.wav"
+            save_wav(path, b"".join(frames))
+            print(f"✅ saved {path}")
 
-def record_once():
-    stream=pa.open(format=fmt,channels=NUM_CHANNELS,rate=44100,
-                   input=True,frames_per_buffer=FRAME_CHUNK,
-                   input_device_index=MIC_DEVICE_INDEX)
-    frames=[]; recording=True
-    log.info("🔴 Grabando…  (pulsar botón/ENTER para parar)")
-    if _gpio: led.on()
-    def wait():
-        nonlocal recording
-        input()
-        recording=False
-    threading.Thread(target=wait,daemon=True).start()
+def capture_loop():
     while recording:
-        frames.append(normalise(stream.read(FRAME_CHUNK,exception_on_overflow=False)))
-    stream.stop_stream(); stream.close()
-    if _gpio: led.off()
-    ts=time.strftime("%Y%m%d-%H%M%S"); fname=f"rec_{ts}.wav"
-    os.makedirs("recordings",exist_ok=True)
-    with wave.open(os.path.join("recordings",fname),"wb") as wf:
+        try:
+            data = stream.read(FRAME_CHUNK, exception_on_overflow=False)
+            frames.append(data)
+        except OSError as e:
+            print("overflow", e)
+
+def save_wav(path, raw):
+    os.makedirs("recordings", exist_ok=True)
+    audio = np.frombuffer(raw, np.int16)
+    if audio.size:
+        peak = np.max(np.abs(audio)); gain = int(0.9*32767/peak) if peak else 1
+        if gain > 1: audio = np.clip(audio*gain, -32768, 32767).astype(np.int16)
+    with wave.open(path, "wb") as wf:
         wf.setnchannels(NUM_CHANNELS)
-        wf.setsampwidth(pa.get_sample_size(fmt))
+        wf.setsampwidth(pa.get_sample_size(pyaudio.paInt16))
         wf.setframerate(SAMPLE_RATE)
-        wf.writeframes(b"".join(frames))
-    log.info("✅ Guardado recordings/%s",fname)
+        wf.writeframes(audio.tobytes())
 
-# -------- GPIO setup ------------- #
-if _gpio:
-    led=LED(GPIO_LED_PIN); btn=Button(GPIO_BUTTON_PIN,pull_up=True,bounce_time=0.05)
-    btn.when_pressed=lambda: threading.Thread(target=record_once,daemon=True).start()
-    log.info("GPIO listo  (botón %d  LED %d)",GPIO_BUTTON_PIN,GPIO_LED_PIN)
-else:
-    log.info("GPIO deshabilitado – probando solo micrófono")
+GPIO.add_event_detect(GPIO_BUTTON_PIN, GPIO.FALLING, callback=toggle, bouncetime=200)
+print("▶️  Ready. Press the button to record. Ctrl‑C to exit.")
 
-log.info("Pulsa botón o ENTER para empezar / parar grabación (Ctrl‑C para salir)")
 try:
-    while True:
-        record_once()
+    while True: time.sleep(1)
 except KeyboardInterrupt:
     pass
 finally:
+    if stream: stream.close()
     pa.terminate()
-    if _gpio: led.off()
+    GPIO.cleanup()
