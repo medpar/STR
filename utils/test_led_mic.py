@@ -1,25 +1,30 @@
 #!/usr/bin/env python3
 """
-Standalone tester for USB mic + external‑resistor button + LED.
+Standalone tester for USB mic + external‑resistor button + LED,
+using polling to detect presses.
 
-* Push‑button toggles recording (LED ON while capturing).
-* WAV saved in ./recordings/ using the mic’s *native* sample‑rate so
-  playback speed is always correct.
+• Button press (GPIO17 HIGH) → LED on, start recording.
+• Next press → LED off, stop & save WAV.
+• Ctrl‑C exits (saves any in‑progress recording).
 
 Run on the Pi:
-
     pip install numpy RPi.GPIO pyaudio
     python utils/test_mic_led.py
 """
 
-from __future__ import annotations
-import os, time, wave, threading, sys, signal
+import os
+import sys
+import time
+import wave
+import threading
+import signal
 from pathlib import Path
+
 import numpy as np
 import pyaudio
-import RPi.GPIO as GPIO  # Use low‑level library – no internal pulls
+import RPi.GPIO as GPIO
 
-# -- import config from parent dir ----------------------------------#
+# Import config from parent dir
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 from config import (          # type: ignore
     MIC_DEVICE_INDEX,
@@ -34,30 +39,29 @@ from config import (          # type: ignore
 
 # ---------------- GPIO setup --------------------------------------#
 GPIO.setmode(GPIO.BCM)
+# External pull‑down: we provide no internal resistor
+GPIO.setup(GPIO_BUTTON_PIN, GPIO.IN)  
 GPIO.setup(GPIO_LED_PIN, GPIO.OUT, initial=GPIO.LOW)
-
-PULL = GPIO.PUD_DOWN if BUTTON_ACTIVE_HIGH else GPIO.PUD_UP
-GPIO.setup(GPIO_BUTTON_PIN, GPIO.IN, pull_up_down=PULL)
 
 # ---------------- audio globals -----------------------------------#
 pa = pyaudio.PyAudio()
 stream = None
-frames: list[bytes] = []
+frames = []
 recording = False
 lock = threading.Lock()
 
-# Query the mic’s native sample‑rate if not fixed in config
+# Determine sample rate
 if MIC_SAMPLE_RATE == 0:
-    dev_info = pa.get_device_info_by_index(MIC_DEVICE_INDEX)
-    SAMPLE_RATE = int(dev_info["defaultSampleRate"])
+    info = pa.get_device_info_by_index(MIC_DEVICE_INDEX)
+    SAMPLE_RATE = int(info["defaultSampleRate"])
 else:
     SAMPLE_RATE = MIC_SAMPLE_RATE
 
-print(f"📌 Mic idx={MIC_DEVICE_INDEX}, native rate={SAMPLE_RATE} Hz")
-print(f"📌 Button GPIO{GPIO_BUTTON_PIN} (active={'HIGH' if BUTTON_ACTIVE_HIGH else 'LOW'})")
-print(f"📌 LED    GPIO{GPIO_LED_PIN}")
+print(f"📌 Mic idx={MIC_DEVICE_INDEX}, rate={SAMPLE_RATE} Hz")
+print(f"📌 Button GPIO{GPIO_BUTTON_PIN}, LED GPIO{GPIO_LED_PIN}")
+print("📌 Wiring: Button to 3.3V; 10 kΩ resistor GPIO→GND (pull‑down).")
 
-# ---------------- helpers -----------------------------------------#
+# ---------------- recording helpers --------------------------------#
 def start_recording():
     global stream, frames, recording
     stream = pa.open(
@@ -71,7 +75,7 @@ def start_recording():
     frames = []
     recording = True
     GPIO.output(GPIO_LED_PIN, GPIO.HIGH)
-    print("🎙️  REC")
+    print("🎙️  REC started")
 
 def stop_recording():
     global stream, recording
@@ -81,11 +85,11 @@ def stop_recording():
         stream = None
     recording = False
     GPIO.output(GPIO_LED_PIN, GPIO.LOW)
-    print("⏹️  STOP")
+    print("⏹️  REC stopped")
 
 def save_wav():
     if not frames:
-        print("⚠️  no audio captured")
+        print("⚠️  No audio captured")
         return
     out_dir = Path("recordings")
     out_dir.mkdir(exist_ok=True)
@@ -95,9 +99,11 @@ def save_wav():
         wf.setsampwidth(pa.get_sample_size(pyaudio.paInt16))
         wf.setframerate(SAMPLE_RATE)
         wf.writeframes(b"".join(frames))
-    print(f"✅ saved {fname.resolve()}")
+    print(f"✅ Saved → {fname.resolve()}")
 
 def capture_loop():
+    """Continuously read audio while `recording` is True."""
+    global frames
     while True:
         if recording and stream:
             data = stream.read(MIC_CHUNK, exception_on_overflow=False)
@@ -112,33 +118,39 @@ def capture_loop():
         else:
             time.sleep(0.01)
 
-def button_callback(channel):
-    with lock:
-        if recording:
-            stop_recording()
-            save_wav()
-        else:
-            start_recording()
+# ---------------- button polling -----------------------------------#
+def poll_button():
+    """Poll the button state and trigger on rising edges."""
+    last_state = GPIO.input(GPIO_BUTTON_PIN)
+    while True:
+        state = GPIO.input(GPIO_BUTTON_PIN)
+        # Detect transition from LOW→HIGH
+        if not last_state and state:
+            with lock:
+                if recording:
+                    stop_recording()
+                    save_wav()
+                else:
+                    start_recording()
+        last_state = state
+        time.sleep(0.05)  # debounce interval
 
-GPIO.add_event_detect(
-    GPIO_BUTTON_PIN,
-    GPIO.RISING if BUTTON_ACTIVE_HIGH else GPIO.FALLING,
-    callback=button_callback,
-    bouncetime=150,
-)
-
-threading.Thread(target=capture_loop, daemon=True).start()
-
-# ---------------- graceful exit -----------------------------------#
+# ---------------- graceful exit ------------------------------------#
 def cleanup(sig, frame):
+    print("\n👋 Exiting…")
     if recording:
         stop_recording()
         save_wav()
     pa.terminate()
+    GPIO.output(GPIO_LED_PIN, GPIO.LOW)
     GPIO.cleanup()
-    print("\n👋 bye")
     sys.exit(0)
 
 signal.signal(signal.SIGINT, cleanup)
-print("Press the push‑button to start/stop recording – Ctrl‑C exits.")
-signal.pause()
+
+# ---------------- main ---------------------------------------------#
+if __name__ == "__main__":
+    print("Press hardware button to toggle recording. Ctrl‑C to quit.")
+    threading.Thread(target=capture_loop, daemon=True).start()
+    threading.Thread(target=poll_button, daemon=True).start()
+    signal.pause()
