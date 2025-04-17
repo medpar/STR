@@ -40,7 +40,7 @@ def normalise(raw:bytes)->bytes:
     return pcm.tobytes()
 
 def record_once():
-    stream=pa.open(format=fmt,channels=NUM_CHANNELS,rate=24000,
+    stream=pa.open(format=fmt,channels=NUM_CHANNELS,rate=44100,
                    input=True,frames_per_buffer=FRAME_CHUNK,
                    input_device_index=MIC_DEVICE_INDEX)
     frames=[]; recording=True
