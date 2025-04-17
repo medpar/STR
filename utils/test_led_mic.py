@@ -57,6 +57,8 @@ if MIC_SAMPLE_RATE == 0:
 else:
     SAMPLE_RATE = MIC_SAMPLE_RATE
 
+SAMPLE_RATE = 48000  # Force to 48kHz for now
+
 print(f"📌 Mic idx={MIC_DEVICE_INDEX}, rate={SAMPLE_RATE} Hz")
 print(f"📌 Button GPIO{GPIO_BUTTON_PIN}, LED GPIO{GPIO_LED_PIN}")
 print("📌 Wiring: Button to 3.3V; 10 kΩ resistor GPIO→GND (pull‑down).")
