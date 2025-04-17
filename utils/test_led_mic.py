@@ -4,12 +4,15 @@ Press the button on GPIO17 to start/stop recording.
 The LED on GPIO27 is lit while recording.
 A WAV is written to ./recordings/rec_YYYYMMDD‑HHMMSS.wav
 
-Playback speed is now correct (48 kHz by default, change in config.py).
+Playback speed is now correct (48 kHz by default, change in config.py).
 """
 
 import os, time, wave, threading
 import numpy as np, pyaudio, RPi.GPIO as GPIO         # pip install numpy
+import sys
 
+# Add the root directory to the path to import config
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from config import SAMPLE_RATE, NUM_CHANNELS, FRAME_CHUNK, \
                    MIC_DEVICE_INDEX, GPIO_BUTTON_PIN, GPIO_LED_PIN
 
