@@ -10,7 +10,7 @@ without running the whole Flask app.
 
 import os, time, threading, wave, logging
 import numpy as np, pyaudio
-from config import (
+from .config import (
     MIC_DEVICE_INDEX, SAMPLE_RATE, FRAME_CHUNK, NUM_CHANNELS,
     NORMALISE_INPUT, GPIO_BUTTON_PIN, GPIO_LED_PIN,
 )
@@ -37,7 +37,7 @@ def normalise(raw:bytes)->bytes:
     return pcm.tobytes()
 
 def record_once():
-    stream=pa.open(format=fmt,channels=NUM_CHANNELS,rate=SAMPLE_RATE,
+    stream=pa.open(format=fmt,channels=NUM_CHANNELS,rate=48000,
                    input=True,frames_per_buffer=FRAME_CHUNK,
                    input_device_index=MIC_DEVICE_INDEX)
     frames=[]; recording=True
