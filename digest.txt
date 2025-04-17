@@ -14,27 +14,41 @@ Directory structure:
 ================================================
 File: /config.py
 ================================================
+#!/usr/bin/env python3
 """
-Central place for every hardware‑specific setting so you only touch one file
-when the USB mic / DAC index changes or you wire the button to another pin.
-Reading first from environment variables keeps it flexible in production.
+Centralised STR hardware/audio/GPIO settings.
+
+Edit this file (or override with ENV vars) whenever the USB‑mic or DAC
+IDs change – no need to touch the rest of the code.
 """
 
 import os
 
-# ----------  Audio devices  ---------- #
-# If MIC_DEVICE_INDEX ≥ 0 it has priority.  Otherwise we search by name.
-MIC_DEVICE_INDEX: int = int(os.getenv("MIC_DEVICE_INDEX", "-1"))
-MIC_DEVICE_NAME: str = os.getenv("MIC_DEVICE_NAME", "USB PnP")  # substring ok
+# ------------------------------------------------------------------#
+#  Audio (USB mic)                                                  #
+# ------------------------------------------------------------------#
+MIC_DEVICE_INDEX: int = int(os.getenv("MIC_DEVICE_INDEX", "1"))
 
-# ALSA hardware string for the PCM5102 (aplay -l  →  e.g.  “plughw:2,0”)
-DAC_HW_ID: str = os.getenv("DAC_HW_ID", "2,0")
+# Set to 0 to auto‑query the mic’s native rate each time
+MIC_SAMPLE_RATE: int = int(os.getenv("MIC_SAMPLE_RATE", "0"))
 
-# ----------  GPIO button + LED  ------- #
-# BCM numbering
-BUTTON_PIN: int = int(os.getenv("BUTTON_PIN", "16"))  # physical pin 36
-LED_PIN:    int = int(os.getenv("LED_PIN", "12"))     # physical pin 32
-ENABLE_GPIO: bool = os.getenv("ENABLE_GPIO", "1") == "1"
+MIC_CHANNELS: int = int(os.getenv("MIC_CHANNELS", "1"))
+MIC_CHUNK: int = int(os.getenv("MIC_CHUNK", "1024"))
+MIC_NORMALISE: bool = os.getenv("MIC_NORMALISE", "1") == "1"
+
+# ------------------------------------------------------------------#
+#  Playback (PCM5102 DAC via aplay)                                 #
+# ------------------------------------------------------------------#
+DAC_APLAY_DEVICE: str = os.getenv("DAC_APLAY_DEVICE", "plughw:2,0")
+
+# ------------------------------------------------------------------#
+#  GPIO – push‑button + LED                                         #
+# ------------------------------------------------------------------#
+GPIO_BUTTON_PIN: int = int(os.getenv("GPIO_BUTTON_PIN", "17"))   # BCM
+GPIO_LED_PIN: int    = int(os.getenv("GPIO_LED_PIN", "27"))
+
+# External resistor pull‑down (True = button pulls GPIO *high* when pressed)
+BUTTON_ACTIVE_HIGH: bool = True
 
 
 ================================================
@@ -42,132 +56,164 @@ File: /realtime.py
 ================================================
 #!/usr/bin/env python3
 """
-Realtime speech‑to‑speech for STR – now with:
- • automatic USB‑mic discovery via config.py
- • gain normalisation per chunk (simple ×2 boost by default)
- • integrates with GPIO button / LED when running on Raspberry Pi
+Realtime speech‑to‑speech for STR.
+
+• Streams USB‑mic audio (with optional normalisation) or typed text
+  to OpenAI Realtime API and plays voice replies through the DAC.
+• Push‑button + LED on Raspberry Pi toggle recording in hardware.
+• Web‑UI “Start/Stop” buttons work in parallel.
+
+Electrical wiring (BCM numbering):
+
+  ┌────────────────────────────┐
+  │ 10 kΩ pull‑down resistor    │
+  │   (GPIO‑>GND)              │
+  └────────┬───────────────────┘
+           │
+3 V3 ─────►┴───┐
+               │   Push‑button
+GPIO17 ◄───────┘
+               │
+GND  ──────────┘
+
+LED anode  ──► 330 Ω resistor ─► GPIO27  
+LED cathode ──► GND
 """
 
 from __future__ import annotations
-import asyncio
-import base64
-import json
-import logging
-import os
-import ssl
-import threading
+
+import asyncio, base64, json, logging, os, ssl, threading
 from typing import Callable, Optional
 
-import numpy as np
-import pyaudio
-import websockets            # 13.*
+import pyaudio, numpy as np, websockets           # websockets==13.*
 
-import config
-
-log = logging.getLogger("realtime")
-
-INSTRUCTIONS = (
-    "You are a professional radio broadcaster. Provide a natural, broadcast‑"
-    "style answer. Answer in Spanish from Spain. Use European formats."
-    " Do not say anything in your first message except 'Hello'."
+from config import (
+    MIC_DEVICE_INDEX,
+    MIC_SAMPLE_RATE,
+    MIC_CHANNELS,
+    MIC_CHUNK,
+    MIC_NORMALISE,
+    DAC_APLAY_DEVICE,
+    GPIO_BUTTON_PIN,
+    GPIO_LED_PIN,
+    BUTTON_ACTIVE_HIGH,
 )
 
-GAIN = float(os.getenv("MIC_GAIN", "2.0"))  # quick, brutal boost
-
+# ------------------------------------------------------------------#
+#  Logging                                                          #
+# ------------------------------------------------------------------#
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)5s | %(name)s | %(message)s",
+)
+log = logging.getLogger("realtime")
 
 # ------------------------------------------------------------------#
-#  Audio helper                                                     #
+#  Prompt                                                           #
+# ------------------------------------------------------------------#
+INSTRUCTIONS = (
+    "You are a professional radio broadcaster. Provide a natural, "
+    "broadcast‑style answer. Answer in Spanish from Spain. Use European "
+    "format for all dates and units. Do not say anything in your first "
+    "message except 'Voice real time mode started.'. Answer briefly."
+)
+
+# ------------------------------------------------------------------#
+#  Audio handler                                                    #
 # ------------------------------------------------------------------#
 class AudioHandler:
-    """Microphone capture & speaker playback."""
+    """USB‑mic capture and local speaker playback."""
 
-    def __init__(
-        self,
-        rate: int = 24_000,
-        chunk: int = 1_024,
-        channels: int = 1,
-        fmt: int = pyaudio.paInt16,
-    ):
-        self.rate = rate
-        self.chunk = chunk
-        self.channels = channels
-        self.fmt = fmt
+    def __init__(self, device_index: int):
+        self.device_index = device_index
+        self.channels = MIC_CHANNELS
+        self.chunk = MIC_CHUNK
+        self.fmt = pyaudio.paInt16
+
         self.p = pyaudio.PyAudio()
+
+        # Query mic’s native rate if not forced
+        if MIC_SAMPLE_RATE == 0:
+            info = self.p.get_device_info_by_index(self.device_index)
+            self.rate = int(info["defaultSampleRate"])
+        else:
+            self.rate = MIC_SAMPLE_RATE
+
         self.stream_in = None
-        self._recording = False
-        self.input_device_index = self._find_device()
+        self._rec = False
 
-    # -------- device discovery -------- #
-    def _find_device(self) -> Optional[int]:
-        if config.MIC_DEVICE_INDEX >= 0:
-            return config.MIC_DEVICE_INDEX
         for i in range(self.p.get_device_count()):
-            name = self.p.get_device_info_by_index(i)["name"]
-            if config.MIC_DEVICE_NAME.lower() in name.lower():
-                log.info("USB mic found at index %d – %s", i, name)
-                return i
-        log.warning("USB mic not found – falling back to default")
-        return None
+            info = self.p.get_device_info_by_index(i)
+            if info["maxInputChannels"]:
+                log.debug("Input‑ID %d : %s", i, info["name"])
 
-    # ------------- microphone ---------- #
-    def start_rec(self):
+    # ---------- mic ---------- #
+    def start(self):
         if self.stream_in:
-            self.stop_rec()
+            self.stop()
         self.stream_in = self.p.open(
             format=self.fmt,
             channels=self.channels,
             rate=self.rate,
             input=True,
             frames_per_buffer=self.chunk,
-            input_device_index=self.input_device_index,
+            input_device_index=self.device_index,
         )
-        self._recording = True
-        log.info("🎙️  Mic ON (%s)", self.input_device_index)
+        self._rec = True
+        log.info("🎙️  Mic ON (idx=%d, %d Hz)", self.device_index, self.rate)
 
-    def read_chunk(self) -> bytes | None:
-        if not self._recording or not self.stream_in:
+    def read(self) -> bytes | None:
+        if not self._rec or not self.stream_in:
             return None
-        data = self.stream_in.read(self.chunk, exception_on_overflow=False)
-        # -------- simple gain -------- #
-        if GAIN != 1.0:
-            pcm = np.frombuffer(data, dtype=np.int16).astype(np.float32) * GAIN
-            pcm_clipped = np.clip(pcm, -32768, 32767).astype(np.int16)
-            return pcm_clipped.tobytes()
-        return data
+        try:
+            data = self.stream_in.read(self.chunk, exception_on_overflow=False)
+            if MIC_NORMALISE:
+                audio = np.frombuffer(data, np.int16)
+                peak = np.max(np.abs(audio)) or 1
+                gain = int(0.9 * 32767 / peak)
+                if gain > 1:
+                    audio = np.clip(audio * gain, -32768, 32767).astype(np.int16)
+                    data = audio.tobytes()
+            return data
+        except Exception as exc:  # noqa: BLE001
+            log.error("Mic read error: %s", exc)
+            return None
 
-    def stop_rec(self):
+    def stop(self):
         if self.stream_in:
             self.stream_in.stop_stream()
             self.stream_in.close()
             self.stream_in = None
-        self._recording = False
+        self._rec = False
         log.info("🎙️  Mic OFF")
 
-    # ------------- speaker ------------- #
-    def play(self, pcm16_audio: bytes):
-        def _worker():
+    # ---------- speaker ---------- #
+    def play(self, pcm16: bytes):
+        def _play():
             try:
                 out = self.p.open(
                     format=self.fmt, channels=1, rate=self.rate, output=True
                 )
-                out.write(pcm16_audio)
+                out.write(pcm16)
                 out.stop_stream()
                 out.close()
-            except Exception:  # noqa: BLE001
-                log.exception("Speaker error")
+            except Exception as exc:  # noqa: BLE001
+                log.error("Speaker error: %s", exc)
 
-        threading.Thread(target=_worker, daemon=True).start()
+        threading.Thread(target=_play, daemon=True).start()
 
-    # ------------- cleanup ------------- #
+    # ---------- cleanup ---------- #
     def close(self):
-        self.stop_rec()
+        self.stop()
         self.p.terminate()
 
 
 # ------------------------------------------------------------------#
-#  RealtimeClient                                                   #
+#  Realtime client                                                  #
 # ------------------------------------------------------------------#
 class RealtimeClient:
+    """Streams audio/text to OpenAI Realtime API."""
+
     _URL = "wss://api.openai.com/v1/realtime"
     _MODEL = "gpt-4o-mini-realtime-preview"
 
@@ -175,121 +221,196 @@ class RealtimeClient:
         self,
         instructions: str,
         voice: str = "ash",
-        on_text: Callable[[str], None] | None = None,
+        mic_index: int = MIC_DEVICE_INDEX,
+        on_text: Optional[Callable[[str], None]] = None,
     ):
+        self.api_key = os.getenv("OPENAI_API_KEY")
+        if not self.api_key:
+            raise RuntimeError("OPENAI_API_KEY missing")
+
         self.voice = voice
         self.instructions = instructions
         self.on_text = on_text
-        self.api_key = os.getenv("OPENAI_API_KEY")
-        if not self.api_key:
-            raise RuntimeError("OPENAI_API_KEY not set")
 
-        self.audio = AudioHandler()
+        self.audio = AudioHandler(mic_index)
         self._audio_buf = b""
-        self._txt_buf = ""
+        self._text_buf = ""
+        self._rec_flag = threading.Event()
 
+        # Async event‑loop in background
         self.loop = asyncio.new_event_loop()
         threading.Thread(target=self.loop.run_forever, daemon=True).start()
 
-        self.ws = asyncio.run_coroutine_threadsafe(self._connect(), self.loop).result()
-        asyncio.run_coroutine_threadsafe(self._receive(), self.loop)
+        # Connect WebSocket
+        self.ws = asyncio.run_coroutine_threadsafe(
+            self._connect(), self.loop
+        ).result()
+        asyncio.run_coroutine_threadsafe(self._recv(), self.loop)
 
-        self._rec_flag = threading.Event()
+        # GPIO
+        self._setup_gpio()
 
-    # -------- WebSocket -------- #
+    # ---------------- WebSocket ------------------------------------#
     async def _connect(self):
         ssl_ctx = ssl.create_default_context()
         ssl_ctx.check_hostname = False
         ssl_ctx.verify_mode = ssl.CERT_NONE
+
         self.ws = await websockets.connect(
             f"{self._URL}?model={self._MODEL}",
-            extra_headers={"Authorization": f"Bearer {self.api_key}",
-                           "OpenAI-Beta": "realtime=v1"},
+            extra_headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "OpenAI-Beta": "realtime=v1",
+            },
             ssl=ssl_ctx,
         )
-        await self._send({
-            "type": "session.update",
-            "session": {
-                "modalities": ["audio", "text"],
-                "instructions": self.instructions,
-                "voice": self.voice,
-                "input_audio_format": "pcm16",
-                "output_audio_format": "pcm16",
-                "turn_detection": None,
-                "input_audio_transcription": {"model": "whisper-1"},
-                "temperature": 0.6,
-            },
-        })
+        await self._send(
+            {
+                "type": "session.update",
+                "session": {
+                    "modalities": ["audio", "text"],
+                    "instructions": self.instructions,
+                    "voice": self.voice,
+                    "input_audio_format": "pcm16",
+                    "output_audio_format": "pcm16",
+                    "turn_detection": None,
+                    "input_audio_transcription": {"model": "whisper-1"},
+                    "temperature": 0.6,
+                },
+            }
+        )
         await self._send({"type": "response.create"})
-        log.info("OpenAI realtime session ready")
+        log.info("Realtime session ready")
         return self.ws
 
     async def _send(self, ev: dict):
         await self.ws.send(json.dumps(ev))
 
-    async def _receive(self):
+    async def _recv(self):
         try:
             async for msg in self.ws:
                 await self._handle(json.loads(msg))
-        except Exception:  # noqa: BLE001
-            log.exception("Receive loop exited")
+        except Exception as exc:  # noqa: BLE001
+            log.error("WS receive loop exited: %s", exc)
 
     async def _handle(self, ev: dict):
-        t = ev.get("type")
-        if t == "response.text.delta":
-            self._txt_buf += ev["delta"]
-        elif t == "response.text.done":
+        typ = ev.get("type")
+        if typ == "error":
+            log.error("API error: %s", ev["error"]["message"])
+        elif typ == "response.text.delta":
+            self._text_buf += ev["delta"]
+        elif typ == "response.text.done":
             if self.on_text:
-                self.on_text(self._txt_buf)
-            self._txt_buf = ""
-        elif t == "response.audio.delta":
+                self.on_text(self._text_buf)
+            self._text_buf = ""
+        elif typ == "response.audio.delta":
             self._audio_buf += base64.b64decode(ev["delta"])
-        elif t == "response.audio.done":
+        elif typ == "response.audio.done":
             if self._audio_buf:
                 self.audio.play(self._audio_buf)
             self._audio_buf = b""
-        elif t == "error":
-            log.error("API error: %s", ev["error"]["message"])
+        else:
+            log.debug("Event %s", typ)
 
-    # -------- mic streaming -------- #
-    async def _mic_stream(self):
-        self.audio.start_rec()
+    # ---------------- mic streaming --------------------------------#
+    async def _mic_loop(self):
+        self.audio.start()
         try:
             while self._rec_flag.is_set():
-                chk = self.audio.read_chunk()
-                if chk:
-                    await self._send({"type": "input_audio_buffer.append",
-                                      "audio": base64.b64encode(chk).decode()})
-                await asyncio.sleep(0)
+                chunk = self.audio.read()
+                if chunk:
+                    await self._send(
+                        {
+                            "type": "input_audio_buffer.append",
+                            "audio": base64.b64encode(chunk).decode(),
+                        }
+                    )
+                await asyncio.sleep(0.0)
         finally:
-            self.audio.stop_rec()
+            self.audio.stop()
             await self._send({"type": "input_audio_buffer.commit"})
             await self._send({"type": "response.create"})
+            log.info("Audio committed")
 
-    # -------- text send ------------ #
-    async def _send_text_async(self, txt: str):
-        await self._send({
-            "type": "conversation.item.create",
-            "item": {"type": "message", "role": "user",
-                     "content": [{"type": "input_text", "text": txt}]},
-        })
+    # ---------------- text -----------------------------------------#
+    async def _send_text_async(self, text: str):
+        await self._send(
+            {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": text}],
+                },
+            }
+        )
         await self._send({"type": "response.create"})
 
-    # -------- public API ----------- #
+    # ---------------- GPIO setup -----------------------------------#
+    def _setup_gpio(self):
+        try:
+            import RPi.GPIO as GPIO  # type: ignore
+        except (ImportError, RuntimeError):
+            log.warning("GPIO not available – running headless dev mode?")
+            self.gpio_ok = False
+            return
+
+        self.gpio_ok = True
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setup(GPIO_LED_PIN, GPIO.OUT, initial=GPIO.LOW)
+
+        pull = GPIO.PUD_DOWN if BUTTON_ACTIVE_HIGH else GPIO.PUD_UP
+        GPIO.setup(GPIO_BUTTON_PIN, GPIO.IN, pull_up_down=pull)
+
+        edge = GPIO.RISING if BUTTON_ACTIVE_HIGH else GPIO.FALLING
+        GPIO.add_event_detect(
+            GPIO_BUTTON_PIN, edge, callback=self._gpio_toggle, bouncetime=150
+        )
+        log.info(
+            "GPIO ready (button GPIO%d active %s, LED GPIO%d)",
+            GPIO_BUTTON_PIN,
+            "HIGH" if BUTTON_ACTIVE_HIGH else "LOW",
+            GPIO_LED_PIN,
+        )
+
+    def _gpio_toggle(self, channel=None):
+        import RPi.GPIO as GPIO  # type: ignore
+        if self._rec_flag.is_set():
+            self.stop_talking()
+            if self.gpio_ok:
+                GPIO.output(GPIO_LED_PIN, GPIO.LOW)
+        else:
+            self.start_talking()
+            if self.gpio_ok:
+                GPIO.output(GPIO_LED_PIN, GPIO.HIGH)
+
+    # ---------------- public API -----------------------------------#
     def start_talking(self):
         if self._rec_flag.is_set():
             return
         self._rec_flag.set()
-        asyncio.run_coroutine_threadsafe(self._mic_stream(), self.loop)
+        asyncio.run_coroutine_threadsafe(self._mic_loop(), self.loop)
+        log.debug("Recording started")
 
     def stop_talking(self):
         self._rec_flag.clear()
+        log.debug("Recording stopped")
 
-    def send_text(self, txt: str):
-        asyncio.run_coroutine_threadsafe(self._send_text_async(txt), self.loop)
+    def send_text(self, text: str):
+        asyncio.run_coroutine_threadsafe(
+            self._send_text_async(text), self.loop
+        )
 
+    # ---------------- cleanup --------------------------------------#
     def close(self):
+        if self.gpio_ok:
+            import RPi.GPIO as GPIO  # type: ignore
+            GPIO.output(GPIO_LED_PIN, GPIO.LOW)
+            GPIO.cleanup((GPIO_BUTTON_PIN, GPIO_LED_PIN))
         self.audio.close()
+        if self.ws and not self.ws.closed:
+            asyncio.run_coroutine_threadsafe(self.ws.close(), self.loop)
+        self.loop.call_soon_threadsafe(self.loop.stop())
 
 
 ================================================
@@ -339,52 +460,51 @@ def generate_tts(text, client, voice_id, model_id, audio_dir):
 ================================================
 File: /audio_manager.py
 ================================================
+#!/usr/bin/env python3
+"""
+Save, convert and play audio – now using config.DAC_APLAY_DEVICE.
+"""
+
 import os
 import sys
 import subprocess
 import logging
 from pydub import AudioSegment
-import config
+
+from config import DAC_APLAY_DEVICE
+
+log = logging.getLogger(__name__)
 
 
+# ------------------------------------------------------------------#
+#  Helpers                                                          #
+# ------------------------------------------------------------------#
 def save_stream_to_file(stream, filepath):
     """Save streaming data to a file."""
-    try:
-        with open(filepath, "wb") as f:
-            for chunk in stream:
-                f.write(chunk)
-        logging.info("File saved: %s", filepath)
-    except Exception:
-        logging.exception("Error saving stream to file.")
-        raise
+    with open(filepath, "wb") as f:
+        for chunk in stream:
+            f.write(chunk)
+    log.info("File saved: %s", filepath)
 
 
 def convert_mp3_to_wav(mp3_filepath, wav_filepath):
-    """Convert an MP3 file to WAV format with desired settings."""
-    try:
-        audio = AudioSegment.from_mp3(mp3_filepath)
-        audio = audio.set_frame_rate(44100).set_sample_width(2).set_channels(2)
-        audio.export(wav_filepath, format="wav")
-        logging.info("Converted %s → %s", mp3_filepath, wav_filepath)
-    except Exception:
-        logging.exception("Error converting MP3 to WAV.")
-        raise
+    """Convert MP3 → WAV, 44.1 kHz stereo 16‑bit."""
+    audio = AudioSegment.from_mp3(mp3_filepath)
+    audio = audio.set_frame_rate(44100).set_sample_width(2).set_channels(2)
+    audio.export(wav_filepath, format="wav")
+    log.info("Converted %s → %s", mp3_filepath, wav_filepath)
 
 
 def play_audio(filepath):
-    """Play an audio file using system‑specific command."""
-    try:
-        if sys.platform.startswith("linux"):
-            play_cmd = ["aplay", "-D", f"plughw:{config.DAC_HW_ID}", filepath]
-        elif sys.platform == "darwin":
-            play_cmd = ["afplay", filepath]
-        else:
-            play_cmd = ["aplay", filepath]
-        logging.info("Playing: %s", " ".join(play_cmd))
-        subprocess.run(play_cmd, check=True)
-    except Exception:
-        logging.exception("Error playing audio.")
-        raise
+    """Play audio using system command."""
+    if sys.platform.startswith("linux"):
+        cmd = ["aplay", "-D", DAC_APLAY_DEVICE, filepath]
+    elif sys.platform == "darwin":
+        cmd = ["afplay", filepath]
+    else:
+        cmd = ["aplay", filepath]
+    log.info("Playing: %s", " ".join(cmd))
+    subprocess.run(cmd, check=True)
 
 
 ================================================
@@ -523,8 +643,7 @@ File: /app.py
 ================================================
 #!/usr/bin/env python3
 """
-Flask / Flask‑SocketIO server for STR – now using file_manager.py,
-plus clear‑history support and chat‑style layout.
+Flask / Flask‑SocketIO server for STR.
 """
 
 from __future__ import annotations
@@ -548,6 +667,7 @@ from agents import process_query
 from tts import generate_tts
 from realtime import RealtimeClient, INSTRUCTIONS
 from file_manager import PDFManager
+from config import MIC_DEVICE_INDEX   # <<<<<< NEW
 
 # ------------------------------------------------------------------#
 #  Config                                                           #
@@ -562,24 +682,24 @@ UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 os.makedirs(AUDIO_DIR, exist_ok=True)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# Keys
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 VOICE_ID = os.getenv("VOICE_ID")
 MODEL_ID = os.getenv("MODEL_ID")
 if not all([ELEVENLABS_API_KEY, VOICE_ID, MODEL_ID]):
-    raise RuntimeError("Missing ELEVENLABS_API_KEY, VOICE_ID or MODEL_ID")
+    raise RuntimeError("Missing ELEVENLABS_API_KEY, VOICE_ID, MODEL_ID")
 
-# Flask + SocketIO
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
 eleven_client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
 openai_client = OpenAI()
 
-# PDF manager
 pdf_manager = PDFManager(UPLOAD_DIR)
 
-# Realtime (voice ash)
+
+# ------------------------------------------------------------------#
+#  Realtime client                                                  #
+# ------------------------------------------------------------------#
 def _broadcast(msg: str):
     socketio.emit("broadcast_text", {"message": msg}, namespace="/realtime")
 
@@ -587,11 +707,11 @@ def _broadcast(msg: str):
 realtime_client = RealtimeClient(
     instructions=INSTRUCTIONS,
     voice="ash",
-    mic_index=int(os.getenv("MIC_DEVICE_INDEX"))
-    if os.getenv("MIC_DEVICE_INDEX")
-    else None,
+    mic_index=MIC_DEVICE_INDEX,      # <<<<<< NEW
     on_text=_broadcast,
 )
+
+
 
 # ------------------------------------------------------------------#
 #  Static / HTML                                                    #
