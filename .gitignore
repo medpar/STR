@@ -1,4 +1,4 @@
-audio_files/*
-**/*__pycache__*
-**/*.env
+audio_files/
+**/__pycache__/
 **/*digest*.txt
+**/.DS_Store
