@@ -17,7 +17,7 @@ MIC_NORMALISE: bool   = os.getenv("MIC_NORMALISE",      "1") == "1"
 # ------------------------------------------------------------------#
 #  Playback (PCM5102 DAC via aplay)                                 #
 # ------------------------------------------------------------------#
-DAC_APLAY_DEVICE: str = os.getenv("DAC_APLAY_DEVICE", "plughw:2,0")
+DAC_APLAY_DEVICE: str = os.getenv("DAC_APLAY_DEVICE", "plughw:1,0")
 
 # ------------------------------------------------------------------#
 #  GPIO – push‑button + LED                                         #
