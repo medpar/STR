@@ -1,12 +1,10 @@
-
-# realtime.py
-
 #!/usr/bin/env python3
 """
 Realtime speech-to-speech for STR.
 
 • Records from USB mic at 48 kHz, downsamples to 24 kHz for OpenAI streaming.
-• Streams audio or typed text to OpenAI Realtime API and plays back at 24 kHz.
+• Streams audio or typed text to OpenAI Realtime API and plays back at 24 kHz
+  via the PCM5102 (stereo) DAC.
 • Toggles recording via web buttons or physical push‑button (GPIO17),
   lights LED (GPIO27) while recording.
 • Uses external 10 kΩ pull‑down resistor on the button when available.
@@ -37,7 +35,6 @@ from config import (
     MIC_CHANNELS,
     MIC_CHUNK,
     MIC_NORMALISE,
-    DAC_APLAY_DEVICE,
     GPIO_BUTTON_PIN,
     GPIO_LED_PIN,
     BUTTON_ACTIVE_HIGH,
@@ -61,7 +58,7 @@ INSTRUCTIONS = (
 )
 
 class AudioHandler:
-    """Handle mic capture at MIC_SAMPLE_RATE and playback at 24 kHz."""
+    """Handle mic capture at MIC_SAMPLE_RATE and playback at 24 kHz stereo."""
 
     def __init__(self, device_index: int):
         self.device_index = device_index
@@ -85,7 +82,7 @@ class AudioHandler:
             self.stop_input()
         self.stream = self.p.open(
             format=self.fmt,
-            #channels=self.channels,
+            channels=self.channels,
             rate=self.input_rate,
             input=True,
             frames_per_buffer=self.chunk,
@@ -126,16 +123,20 @@ class AudioHandler:
         log.info("🎙️ Mic OFF")
 
     def play(self, data: bytes):
-        """Play API response audio at 24 kHz."""
+        """Play API response audio at 24 kHz stereo via PCM5102."""
+
         def _playback():
             try:
+                # PCM5102 is stereo; duplicate mono into both channels
+                samples = np.frombuffer(data, dtype=np.int16)
+                stereo = np.repeat(samples, 2)
                 out = self.p.open(
                     format=self.fmt,
-                    channels=1,
+                    channels=2,
                     rate=API_SAMPLE_RATE,
                     output=True,
                 )
-                out.write(data)
+                out.write(stereo.tobytes())
                 out.stop_stream()
                 out.close()
             except Exception as e:
@@ -146,6 +147,7 @@ class AudioHandler:
     def close(self):
         self.stop_input()
         self.p.terminate()
+
 
 class RealtimeClient:
     URL = "wss://api.openai.com/v1/realtime"
@@ -174,9 +176,7 @@ class RealtimeClient:
         self.loop = asyncio.new_event_loop()
         threading.Thread(target=self.loop.run_forever, daemon=True).start()
 
-        self.ws = asyncio.run_coroutine_threadsafe(
-            self._connect(), self.loop
-        ).result()
+        self.ws = asyncio.run_coroutine_threadsafe(self._connect(), self.loop).result()
         asyncio.run_coroutine_threadsafe(self._recv_loop(), self.loop)
 
         if HAS_GPIO:
