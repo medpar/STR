@@ -82,7 +82,7 @@ class AudioHandler:
             self.stop_input()
         self.stream = self.p.open(
             format=self.fmt,
-            channels=self.channels,
+            #channels=self.channels,
             rate=self.input_rate,
             input=True,
             frames_per_buffer=self.chunk,
@@ -132,7 +132,7 @@ class AudioHandler:
                 stereo = np.repeat(samples, 2)
                 out = self.p.open(
                     format=self.fmt,
-                    channels=2,
+                    channels=1,
                     rate=API_SAMPLE_RATE,
                     output=True,
                 )
