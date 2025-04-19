@@ -11,7 +11,7 @@
       .chat-container {
         display: flex;
         flex-direction: column;
-        height: calc(100vh - 200px); /* Adjust as needed */
+        height: calc(100vh - 200px);
         max-height: 70vh;
         min-height: 300px;
       }
@@ -148,50 +148,6 @@
         align-self: center;
         margin: 0.5rem auto;
       }
-      /* Bluetooth Switch Styling */
-      .switch {
-        position: relative;
-        display: inline-block;
-        width: 50px;
-        height: 24px;
-        flex-shrink: 0;
-      }
-      .switch input {
-        opacity: 0;
-        width: 0;
-        height: 0;
-      }
-      .slider {
-        position: absolute;
-        cursor: pointer;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        background-color: #ccc;
-        transition: 0.4s;
-        border-radius: 24px;
-      }
-      .slider:before {
-        position: absolute;
-        content: "";
-        height: 18px;
-        width: 18px;
-        left: 3px;
-        bottom: 3px;
-        background-color: white;
-        transition: 0.4s;
-        border-radius: 50%;
-      }
-      input:checked + .slider {
-        background-color: #2563eb;
-      }
-      input:focus + .slider {
-        box-shadow: 0 0 1px #2563eb;
-      }
-      input:checked + .slider:before {
-        transform: translateX(26px);
-      }
     </style>
   </head>
   <body class="bg-gray-100 text-gray-900 font-sans antialiased">
@@ -204,16 +160,16 @@
 
       <!-- Tabs -->
       <nav class="flex justify-center border-b border-gray-300 pb-0" id="tabs">
-        <button data-tab="tts" class="tab active">TTS</button>
-        <button data-tab="agent" class="tab">Agent</button>
-        <button data-tab="realtime" class="tab">Realtime</button>
-        <button data-tab="pdf" class="tab">PDF</button>
-        <button data-tab="bluetooth" class="tab">Bluetooth</button>
+        <button data-tab="tts" class="tab active">Texto a Voz</button>
+        <button data-tab="agent" class="tab">Agente</button>
+        <button data-tab="realtime" class="tab">Conversación</button>
+        <button data-tab="pdf" class="tab">Documentos</button>
+        <button data-tab="debug" class="tab">Debug</button>
       </nav>
 
       <!-- Panels Container -->
       <div class="bg-white rounded-lg shadow-lg overflow-hidden">
-        <!-- ------------ TTS ------------- -->
+        <!-- Texto a Voz -->
         <section id="panel-tts" class="panel chat-container">
           <div id="ttsFeed" class="chat-history"></div>
           <div
@@ -232,7 +188,7 @@
           </div>
         </section>
 
-        <!-- ------------ Agent ----------- -->
+        <!-- Agente -->
         <section id="panel-agent" class="panel chat-container hidden">
           <div id="agentFeed" class="chat-history"></div>
           <div
@@ -251,7 +207,7 @@
           </div>
         </section>
 
-        <!-- -------- Realtime ------------ -->
+        <!-- Conversación -->
         <section id="panel-realtime" class="panel chat-container hidden">
           <div id="realtimeFeed" class="chat-history">
             <p id="realtimeStatus" class="status-message">Initializing...</p>
@@ -282,7 +238,7 @@
           </div>
         </section>
 
-        <!-- ------------- PDF ------------ -->
+        <!-- Documentos -->
         <section id="panel-pdf" class="panel chat-container hidden">
           <div id="pdfFeed" class="chat-history">
             <p id="pdfUploadStatus" class="status-message">
@@ -313,55 +269,57 @@
           </div>
         </section>
 
-        <!-- ---------- Bluetooth ----------- -->
-        <section
-          id="panel-bluetooth"
-          class="panel hidden p-6 flex flex-col gap-4 items-center"
-        >
-          <h2 class="text-xl font-semibold text-gray-700">Control Bluetooth</h2>
-          <div
-            class="flex items-center justify-between gap-4 p-4 border border-gray-200 rounded-lg bg-gray-50 w-full max-w-md"
-          >
-            <span class="font-medium text-gray-600"
-              >Enable Discoverable & Pairing:</span
-            >
-            <label class="switch">
-              <input type="checkbox" id="btToggle" />
-              <span class="slider"></span>
-            </label>
+        <!-- Debug -->
+        <section id="panel-debug" class="panel chat-container hidden">
+          <div id="debugFeed" class="chat-history">
+            <p class="status-message">Herramientas de depuración</p>
           </div>
-          <div
-            id="bluetoothStatus"
-            class="mt-4 text-sm text-gray-600 p-3 border border-gray-200 rounded-lg bg-gray-50 w-full max-w-md"
-          >
-            <p>
-              <strong>Status:</strong>
-              <span id="btStatusText">Fetching...</span>
-            </p>
-            <p>
-              <strong>Powered:</strong>
-              <span id="btPowered" class="font-medium">...</span>
-            </p>
-            <p>
-              <strong>Discoverable:</strong>
-              <span id="btDiscoverable" class="font-medium">...</span>
-            </p>
-            <p>
-              <strong>Pairable:</strong>
-              <span id="btPairable" class="font-medium">...</span>
-            </p>
-            <p id="btError" class="text-red-600 mt-1 font-semibold"></p>
+          <div class="chat-input-area flex flex-col gap-4">
+            <!-- Play Tone -->
+            <div class="flex gap-2">
+              <input
+                type="number"
+                id="toneFreq"
+                class="input-box w-24"
+                placeholder="Hz"
+                value="440"
+              />
+              <input
+                type="number"
+                id="toneDur"
+                class="input-box w-24"
+                placeholder="ms"
+                value="500"
+              />
+              <button id="tonePlay" class="btn btn-primary">
+                Reproducir Tono
+              </button>
+            </div>
+            <!-- LED -->
+            <div class="flex gap-2">
+              <button id="ledTest" class="btn btn-secondary">Test LED</button>
+            </div>
+            <!-- Button State -->
+            <div class="flex gap-2 items-center">
+              <button id="btnState" class="btn btn-secondary">
+                Leer Botón
+              </button>
+              <span id="btnResult" class="font-medium"></span>
+            </div>
+            <!-- Mic Record -->
+            <div class="flex gap-2">
+              <input
+                type="number"
+                id="micDur"
+                class="input-box w-24"
+                placeholder="seg"
+                value="3"
+              />
+              <button id="micRec" class="btn btn-primary">Grabar Mic</button>
+            </div>
           </div>
-          <p class="text-xs text-gray-500 max-w-md text-center mt-2">
-            Note: System configuration (e.g., /etc/bluetooth/main.conf) might
-            override runtime settings.
-          </p>
-          <button id="btRefreshStatus" class="btn btn-secondary mt-2">
-            Refresh Status
-          </button>
         </section>
       </div>
-      <!-- End Card-like container -->
     </div>
 
     <script>
@@ -369,9 +327,7 @@
       const el = (sel) => document.querySelector(sel);
       const elAll = (sel) => document.querySelectorAll(sel);
 
-      // --- Helper Functions ---
       function showToast(message, type = "info") {
-        // Replace with a proper toast library if needed
         console.log(`TOAST (${type}): ${message}`);
         const toast = document.createElement("div");
         toast.textContent = message;
@@ -396,14 +352,12 @@
           const statusElement = el(statusSel);
           if (statusElement) {
             if (feed.contains(statusElement)) {
-              // Check if status is INSIDE feed
               const p = document.createElement("p");
               p.id = statusElement.id;
-              p.className = "status-message"; // Use consistent class
+              p.className = "status-message";
               p.textContent = initialMsg;
               feed.appendChild(p);
             } else {
-              // Status is OUTSIDE feed
               statusElement.textContent = initialMsg;
             }
           }
@@ -434,8 +388,7 @@
             audio.src = audioUrl;
             audio.className = "mt-2 w-full";
             bubbleDiv.appendChild(audio);
-          } catch (e) {
-            console.error("Error creating audio element:", e);
+          } catch {
             const errorP = document.createElement("p");
             errorP.className = "text-red-500 text-xs mt-1";
             errorP.textContent = "Could not load audio player.";
@@ -450,10 +403,9 @@
 
       async function apiCall(endpoint, method = "POST", body = null) {
         try {
-          const options = { method: method, headers: {} };
+          const options = { method, headers: {} };
           if (body) {
             if (body instanceof FormData) {
-              // Let browser set Content-Type for FormData
               options.body = body;
             } else {
               options.headers["Content-Type"] = "application/json";
@@ -461,65 +413,47 @@
             }
           }
           const response = await fetch(endpoint, options);
-          // Try parsing JSON, but handle potential non-JSON error responses
           let data;
           const contentType = response.headers.get("content-type");
-          if (contentType && contentType.indexOf("application/json") !== -1) {
+          if (contentType && contentType.includes("application/json")) {
             data = await response.json();
           } else {
-            // Handle plain text or other error types
             const text = await response.text();
             data = {
               success: response.ok,
-              error: text || `HTTP error ${response.status}`,
+              error: text || `HTTP ${response.status}`,
             };
           }
-
-          // Add success based on HTTP status if not present in JSON
-          if (typeof data.success === "undefined") {
-            data.success = response.ok;
-          }
-          if (!response.ok && !data.error) {
-            data.error = data.message || `HTTP error ${response.status}`;
-          }
+          if (data.success === undefined) data.success = response.ok;
+          if (!response.ok && !data.error)
+            data.error = data.message || `HTTP ${response.status}`;
           return data;
-        } catch (error) {
-          console.error(`API call to ${endpoint} failed:`, error);
-          return { success: false, error: error.message };
+        } catch (err) {
+          console.error(`API call to ${endpoint} failed:`, err);
+          return { success: false, error: err.message };
         }
       }
 
-      /* ---------- Tabs ---------- */
+      /* Tabs */
       const tabs = elAll("#tabs .tab");
       const panels = elAll(".panel");
       tabs.forEach((tab) => {
         tab.onclick = () => {
           tabs.forEach((t) => t.classList.remove("active"));
           tab.classList.add("active");
-          const targetPanelId = `panel-${tab.dataset.tab}`;
+          const target = `panel-${tab.dataset.tab}`;
           panels.forEach((p) => {
-            if (p.id === targetPanelId) {
-              p.classList.remove("hidden");
-              const history = p.querySelector(".chat-history");
-              if (history) {
-                requestAnimationFrame(() => {
-                  history.scrollTop = history.scrollHeight;
-                });
-              }
-              if (tab.dataset.tab === "bluetooth") {
-                refreshBluetoothStatus();
-              }
-            } else {
-              p.classList.add("hidden");
-            }
+            p.id === target
+              ? p.classList.remove("hidden")
+              : p.classList.add("hidden");
           });
         };
       });
 
-      /* ---------- TTS ---------- */
-      const ttsInput = el("#ttsInput");
-      const ttsSendBtn = el("#ttsSend");
-      const ttsFeed = "#ttsFeed";
+      /* TTS */
+      const ttsInput = el("#ttsInput"),
+        ttsSendBtn = el("#ttsSend"),
+        ttsFeed = "#ttsFeed";
       ttsSendBtn.onclick = async () => {
         const txt = ttsInput.value.trim();
         if (!txt) return;
@@ -527,30 +461,18 @@
         ttsInput.value = "";
         ttsInput.focus();
         ttsSendBtn.disabled = true;
-        const result = await apiCall("/api/tts", "POST", { text: txt });
-        if (result && result.success && result.message) {
-          appendBubble(ttsFeed, result.message, "bot", result.audio_url);
-        } else {
-          appendBubble(
-            ttsFeed,
-            `Error: ${result.error || "Unknown TTS error"}`,
-            "bot"
-          );
-        }
+        const res = await apiCall("/api/tts", "POST", { text: txt });
+        if (res.success && res.message)
+          appendBubble(ttsFeed, res.message, "bot", res.audio_url);
+        else appendBubble(ttsFeed, `Error: ${res.error}`, "bot");
         ttsSendBtn.disabled = false;
       };
       el("#ttsClear").onclick = () => feedClear(ttsFeed);
-      ttsInput.addEventListener("keypress", (e) => {
-        if (e.key === "Enter" && !e.shiftKey) {
-          e.preventDefault();
-          ttsSendBtn.click();
-        }
-      });
 
-      /* ---------- Agent ---------- */
-      const agentInput = el("#agentInput");
-      const agentSendBtn = el("#agentSend");
-      const agentFeed = "#agentFeed";
+      /* Agent */
+      const agentInput = el("#agentInput"),
+        agentSendBtn = el("#agentSend"),
+        agentFeed = "#agentFeed";
       agentSendBtn.onclick = async () => {
         const q = agentInput.value.trim();
         if (!q) return;
@@ -558,53 +480,35 @@
         agentInput.value = "";
         agentInput.focus();
         agentSendBtn.disabled = true;
-        const result = await apiCall("/api/agent", "POST", { query: q });
-        if (result && result.success && result.message) {
-          appendBubble(agentFeed, result.message, "bot", result.audio_url);
-        } else {
-          appendBubble(
-            agentFeed,
-            `Error: ${result.error || "Unknown Agent error"}`,
-            "bot"
-          );
-        }
+        const res = await apiCall("/api/agent", "POST", { query: q });
+        if (res.success && res.message)
+          appendBubble(agentFeed, res.message, "bot", res.audio_url);
+        else appendBubble(agentFeed, `Error: ${res.error}`, "bot");
         agentSendBtn.disabled = false;
       };
       el("#agentClear").onclick = () => feedClear(agentFeed);
-      agentInput.addEventListener("keypress", (e) => {
-        if (e.key === "Enter" && !e.shiftKey) {
-          e.preventDefault();
-          agentSendBtn.click();
-        }
-      });
 
-      /* ---------- Realtime ---------- */
-      const rtStatusEl = el("#realtimeStatus");
-      const startBtn = el("#startTalking");
-      const stopBtn = el("#stopTalking");
-      const rtTextInput = el("#realtimeText");
-      const rtTextSendBtn = el("#realtimeTextSend");
-      const realtimeFeed = "#realtimeFeed";
+      /* Realtime */
+      const startBtn = el("#startTalking"),
+        stopBtn = el("#stopTalking"),
+        rtStatus = el("#realtimeStatus"),
+        realtimeFeed = "#realtimeFeed",
+        rtText = el("#realtimeText"),
+        rtTextSend = el("#realtimeTextSend");
       startBtn.onclick = () => socket.emit("start_talking");
       stopBtn.onclick = () => socket.emit("stop_talking");
       el("#rtClear").onclick = () =>
         feedClear(realtimeFeed, "#realtimeStatus", "Ready");
-      rtTextSendBtn.onclick = () => {
-        const m = rtTextInput.value.trim();
+      rtTextSend.onclick = () => {
+        const m = rtText.value.trim();
         if (!m) return;
         appendBubble(realtimeFeed, m, "user");
-        rtTextInput.value = "";
-        rtTextInput.focus();
+        rtText.value = "";
+        rtText.focus();
         socket.emit("send_text", { text: m });
       };
-      rtTextInput.addEventListener("keypress", (e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          rtTextSendBtn.click();
-        }
-      });
       socket.on("status", (d) => {
-        if (rtStatusEl) rtStatusEl.textContent = d.message;
+        rtStatus.textContent = d.message;
         if (d.message === "Recording…") {
           startBtn.disabled = true;
           stopBtn.disabled = false;
@@ -618,214 +522,134 @@
       });
       socket.on("broadcast_text", (d) => {
         appendBubble(realtimeFeed, d.message, "bot");
-        if (rtStatusEl) rtStatusEl.textContent = "Ready";
+        rtStatus.textContent = "Ready";
         startBtn.disabled = false;
         stopBtn.disabled = true;
       });
       socket.on("connect", () => {
-        console.log("Realtime Socket Connected");
-        if (rtStatusEl) rtStatusEl.textContent = "Connected. Ready.";
+        rtStatus.textContent = "Connected. Ready.";
         startBtn.disabled = false;
         stopBtn.disabled = true;
       });
       socket.on("disconnect", () => {
-        console.log("Realtime Socket Disconnected");
-        if (rtStatusEl) rtStatusEl.textContent = "Disconnected. Please reload.";
+        rtStatus.textContent = "Disconnected. Please reload.";
         startBtn.disabled = true;
         stopBtn.disabled = true;
       });
       socket.on("connect_error", (err) => {
-        console.error("Realtime Socket Connection Error:", err);
-        if (rtStatusEl)
-          rtStatusEl.textContent = `Connection Error: ${err.message}`;
+        rtStatus.textContent = `Connection Error: ${err.message}`;
         startBtn.disabled = true;
         stopBtn.disabled = true;
       });
 
-      /* ---------- PDF ---------- */
+      /* PDF */
       let currentPDF = null;
-      const pdfStatusEl = el("#pdfUploadStatus");
-      const pdfQASection = el("#pdfQA");
-      const pdfFileInput = el("#pdfFile");
-      const pdfQuestionInput = el("#pdfQuestion");
-      const pdfAskBtn = el("#pdfAsk");
-      const pdfFeed = "#pdfFeed";
-      pdfFileInput.onchange = async () => {
-        const file = pdfFileInput.files[0];
+      const pdfFile = el("#pdfFile"),
+        pdfAskBtn = el("#pdfAsk"),
+        pdfQuestion = el("#pdfQuestion"),
+        pdfClearBtn = el("#pdfClear"),
+        pdfFeed = "#pdfFeed",
+        pdfStatus = el("#pdfUploadStatus"),
+        pdfQA = el("#pdfQA");
+      pdfFile.onchange = async () => {
+        const file = pdfFile.files[0];
         if (!file) return;
-        pdfStatusEl.textContent = "⏳ Subiendo e indexando…";
-        pdfStatusEl.classList.remove("hidden");
-        pdfQASection.classList.add("hidden");
+        pdfStatus.textContent = "⏳ Subiendo e indexando…";
+        pdfQA.classList.add("hidden");
         pdfAskBtn.disabled = true;
         currentPDF = null;
-        const formData = new FormData();
-        formData.append("file", file);
-        const result = await apiCall("/api/pdf/upload", "POST", formData);
-        if (result && result.success && result.filename) {
-          currentPDF = result.filename;
-          const statusText = `✅ PDF listo: ${currentPDF}`;
-          pdfStatusEl.textContent = statusText;
-          pdfQASection.classList.remove("hidden");
+        const fd = new FormData();
+        fd.append("file", file);
+        const res = await apiCall("/api/pdf/upload", "POST", fd);
+        if (res.success && res.filename) {
+          currentPDF = res.filename;
+          const txt = `✅ PDF listo: ${currentPDF}`;
+          pdfStatus.textContent = txt;
+          pdfQA.classList.remove("hidden");
           pdfAskBtn.disabled = false;
-          pdfQuestionInput.focus();
-          feedClear(pdfFeed, "#pdfUploadStatus", statusText); // Clear old chat for new PDF
+          pdfQuestion.focus();
+          feedClear(pdfFeed, "#pdfUploadStatus", txt);
         } else {
-          pdfStatusEl.textContent = `⚠️ Error: ${
-            result.error || "Upload failed"
-          }`;
-          pdfFileInput.value = "";
+          pdfStatus.textContent = `⚠️ Error: ${res.error}`;
+          pdfFile.value = "";
         }
       };
       pdfAskBtn.onclick = async () => {
-        const q = pdfQuestionInput.value.trim();
+        const q = pdfQuestion.value.trim();
         if (!q || !currentPDF) {
           showToast("Please enter question & ensure PDF is loaded.", "warning");
           return;
         }
         appendBubble(pdfFeed, q, "user");
-        pdfQuestionInput.value = "";
-        pdfQuestionInput.focus();
+        pdfQuestion.value = "";
+        pdfQuestion.focus();
         pdfAskBtn.disabled = true;
-        const result = await apiCall("/api/pdf/ask", "POST", {
+        const res = await apiCall("/api/pdf/ask", "POST", {
           question: q,
           filename: currentPDF,
         });
-        if (result && result.success && result.answer) {
-          appendBubble(pdfFeed, result.answer, "bot", result.audio_url);
-        } else {
-          appendBubble(
-            pdfFeed,
-            `Error: ${result.error || "Could not get answer"}`,
-            "bot"
-          );
-        }
+        if (res.success && res.answer)
+          appendBubble(pdfFeed, res.answer, "bot", res.audio_url);
+        else appendBubble(pdfFeed, `Error: ${res.error}`, "bot");
         pdfAskBtn.disabled = false;
       };
-      pdfQuestionInput.addEventListener("keypress", (e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          pdfAskBtn.click();
-        }
-      });
-      el("#pdfClear").onclick = () => {
-        const statusText = currentPDF
+      pdfClearBtn.onclick = () => {
+        const txt = currentPDF
           ? `✅ PDF listo: ${currentPDF}`
           : "Elige un PDF para cargar…";
-        feedClear(pdfFeed, "#pdfUploadStatus", statusText);
+        feedClear(pdfFeed, "#pdfUploadStatus", txt);
       };
 
-      /* ---------- Bluetooth ---------- */
-      const btToggle = el("#btToggle");
-      const btStatusText = el("#btStatusText");
-      const btPowered = el("#btPowered");
-      const btDiscoverable = el("#btDiscoverable");
-      const btPairable = el("#btPairable");
-      const btError = el("#btError");
-      const btRefreshBtn = el("#btRefreshStatus");
-
-      // Function to update UI based on status data
-      function updateBluetoothUI(statusData) {
-        btPowered.textContent =
-          statusData.powered === null
-            ? "N/A"
-            : statusData.powered
-            ? "Yes"
-            : "No";
-        btDiscoverable.textContent =
-          statusData.discoverable === null
-            ? "N/A"
-            : statusData.discoverable
-            ? "Yes"
-            : "No";
-        btPairable.textContent =
-          statusData.pairable === null
-            ? "N/A"
-            : statusData.pairable
-            ? "Yes"
-            : "No";
-
-        // Set toggle state based on *both* being true (or based on powered status if appropriate)
-        const isBtOn =
-          statusData.powered && statusData.discoverable && statusData.pairable;
-        btToggle.checked = isBtOn;
-        btToggle.disabled = statusData.powered === null; // Disable if status is unknown
-
-        if (statusData.error) {
-          btStatusText.textContent = "Error";
-          btError.textContent = statusData.error;
-          btToggle.disabled = true; // Keep disabled on error
-        } else {
-          btStatusText.textContent = "OK";
-          btError.textContent = ""; // Clear previous errors
-        }
-      }
-
-      async function refreshBluetoothStatus() {
-        btStatusText.textContent = "Fetching...";
-        btPowered.textContent = "...";
-        btDiscoverable.textContent = "...";
-        btPairable.textContent = "...";
-        btError.textContent = "";
-        btToggle.disabled = true;
-        btRefreshBtn.disabled = true;
-
-        const result = await apiCall("/api/bluetooth/status", "GET");
-
-        if (result) {
-          // apiCall now always returns an object
-          updateBluetoothUI(result); // Update UI with fetched data or error
-        } else {
-          // Should not happen with current apiCall, but handle just in case
-          updateBluetoothUI({
-            error: "Failed to fetch status: Invalid response.",
-          });
-        }
-        btRefreshBtn.disabled = false; // Re-enable refresh button
-      }
-
-      btToggle.onchange = async () => {
-        const enable = btToggle.checked;
-        btToggle.disabled = true; // Disable during API call
-        btRefreshBtn.disabled = true; // Disable refresh during change
-        btStatusText.textContent = enable ? "Enabling..." : "Disabling...";
-        btError.textContent = ""; // Clear previous errors
-
-        // *** Call the NEW single endpoint ***
-        const result = await apiCall("/api/bluetooth/set_mode", "POST", {
-          enable: enable,
+      /* Debug */
+      const tonePlay = el("#tonePlay"),
+        ledTest = el("#ledTest"),
+        btnState = el("#btnState"),
+        micRec = el("#micRec"),
+        toneFreq = el("#toneFreq"),
+        toneDur = el("#toneDur"),
+        micDur = el("#micDur"),
+        btnResult = el("#btnResult"),
+        debugFeed = "#debugFeed";
+      tonePlay.onclick = async () => {
+        const f = +toneFreq.value,
+          d = +toneDur.value;
+        appendBubble(debugFeed, `Tono ${f}Hz ${d}ms…`, "user");
+        const res = await apiCall("/api/debug/tone", "POST", {
+          frequency: f,
+          duration: d,
         });
-
-        if (result && result.success) {
-          showToast(
-            result.message || `Bluetooth mode set to ${enable ? "ON" : "OFF"}`,
-            "success"
-          );
-          // Refresh status after a short delay to allow system changes
-          setTimeout(refreshBluetoothStatus, 1500);
-        } else {
-          const errMsg = result.error || "Failed to set Bluetooth mode.";
-          showToast(`Error: ${errMsg}`, "error");
-          btError.textContent = `Update failed: ${errMsg}`;
-          // Revert toggle state visually on failure and refresh status immediately
-          btToggle.checked = !enable; // Revert UI toggle
-          refreshBluetoothStatus(); // Get actual current state which likely failed to change
-        }
-        // Re-enable is handled by refreshBluetoothStatus completing
+        if (res.success && res.audio_url)
+          appendBubble(debugFeed, "Reproducido", "bot", res.audio_url);
+        else appendBubble(debugFeed, `Error: ${res.error}`, "bot");
+      };
+      ledTest.onclick = async () => {
+        appendBubble(debugFeed, "Parpadeo LED…", "user");
+        const res = await apiCall("/api/debug/led", "POST", {});
+        if (res.success) appendBubble(debugFeed, res.message, "bot");
+        else appendBubble(debugFeed, `Error: ${res.error}`, "bot");
+      };
+      btnState.onclick = async () => {
+        appendBubble(debugFeed, "Leyendo botón…", "user");
+        const res = await apiCall("/api/debug/button", "GET");
+        if (res.success && typeof res.pressed === "boolean") {
+          const txt = res.pressed ? "Pulsado" : "Libre";
+          btnResult.textContent = txt;
+          appendBubble(debugFeed, `Estado: ${res.pressed}`, "bot");
+        } else appendBubble(debugFeed, `Error: ${res.error}`, "bot");
+      };
+      micRec.onclick = async () => {
+        const d = +micDur.value;
+        appendBubble(debugFeed, `Grabando ${d}s…`, "user");
+        const res = await apiCall("/api/debug/mic", "POST", { duration: d });
+        if (res.success && res.audio_url)
+          appendBubble(debugFeed, "Grabación lista", "bot", res.audio_url);
+        else appendBubble(debugFeed, `Error: ${res.error}`, "bot");
       };
 
-      btRefreshBtn.onclick = refreshBluetoothStatus;
-
-      // --- Initial Setup ---
       document.addEventListener("DOMContentLoaded", () => {
-        console.log("DOM Content Loaded");
-        if (rtStatusEl) rtStatusEl.textContent = "Connecting...";
-        startBtn.disabled = true;
-        stopBtn.disabled = true;
-        pdfQASection.classList.add("hidden");
-        pdfAskBtn.disabled = true;
-        // Optional: Initial BT status check on load, or wait for tab click
-        // refreshBluetoothStatus();
+        el(`#panel-tts`).classList.remove("hidden");
       });
     </script>
   </body>
 </html>
+```

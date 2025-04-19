@@ -1,13 +1,15 @@
+# agents.py
+
 import os
 import logging
 import re
 from dotenv import load_dotenv
 from openai import OpenAI
+from config import OPENAI_MODEL_AGENT
 
 load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-
 
 if not OPENAI_API_KEY:
     logging.error("Falta API_KEY en el .env")
@@ -18,18 +20,20 @@ def process_query(query: str) -> str:
     Process an agent query using the OpenRouter API and return the broadcast text.
     """
     instructions = (
-        "You are a professional radio broadcaster. Provide a natural, broadcast-style answer without any URLs, links, or references in your response. Answer in castillian spanish. Use european format for all dates and units. Your response should always be in plain text, DO NOT use markdown. Answer very very briefly in maximum one paragraph."
+        "You are a professional radio broadcaster. Provide a natural, broadcast-style answer without any URLs, links, or references in your response. "
+        "Answer in castillian spanish. Use european format for all dates and units. Your response should always be in plain text, DO NOT use markdown. "
+        "Answer very very briefly in maximum one paragraph."
     )
     client = OpenAI()
     response = client.responses.create(
-        model="gpt-4.1-mini",
+        model=OPENAI_MODEL_AGENT,
         tools=[{"type": "web_search_preview"}],
         instructions=instructions,
         input=query
     )
     raw_text = response.output_text
-    # Remove markdown links like ([text](url)) and surrounding whitespace
-    processed_text = re.sub(r'\s*\(\[([^\\\]]+)\]\(([^)]+)\)\)\s*', r'', raw_text).strip()
+    # Remove any markdown-like artifacts
+    processed_text = re.sub(r'\[.*?\]\(.*?\)', '', raw_text).strip()
     return processed_text
 
 if __name__ == "__main__":

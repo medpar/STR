@@ -1,3 +1,6 @@
+
+# realtime.py
+
 #!/usr/bin/env python3
 """
 Realtime speech-to-speech for STR.
@@ -7,7 +10,6 @@ Realtime speech-to-speech for STR.
 • Toggles recording via web buttons or physical push‑button (GPIO17),
   lights LED (GPIO27) while recording.
 • Uses external 10 kΩ pull‑down resistor on the button when available.
-
 """
 
 from __future__ import annotations
@@ -18,12 +20,11 @@ import base64
 import asyncio
 import threading
 import logging
-
 import pyaudio
 import numpy as np
-import websockets  # ==13.*
+import websockets
 
-# Try to import RPi.GPIO; if unavailable, disable GPIO features
+# GPIO import (optional)
 try:
     import RPi.GPIO as GPIO
     HAS_GPIO = True
@@ -40,25 +41,18 @@ from config import (
     GPIO_BUTTON_PIN,
     GPIO_LED_PIN,
     BUTTON_ACTIVE_HIGH,
+    OPENAI_MODEL_REALTIME,
+    OPENAI_MODEL_TRANSCRIPTION,
 )
 
-# ----------------------------------------------------------------------
-# Logging
-# ----------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)5s | %(name)s | %(message)s",
 )
 log = logging.getLogger("realtime")
 
-# ----------------------------------------------------------------------
-# Constants
-# ----------------------------------------------------------------------
 API_SAMPLE_RATE = 24000  # OpenAI Realtime expects 24 kHz
 
-# ----------------------------------------------------------------------
-# Prompt
-# ----------------------------------------------------------------------
 INSTRUCTIONS = (
     "You are a professional radio broadcaster. Provide a natural, "
     "broadcast-style answer. Answer in Spanish from Spain. Use European "
@@ -66,9 +60,6 @@ INSTRUCTIONS = (
     "message except 'Started'. Answer briefly."
 )
 
-# ----------------------------------------------------------------------
-# AudioHandler
-# ----------------------------------------------------------------------
 class AudioHandler:
     """Handle mic capture at MIC_SAMPLE_RATE and playback at 24 kHz."""
 
@@ -79,7 +70,6 @@ class AudioHandler:
         self.fmt = pyaudio.paInt16
         self.p = pyaudio.PyAudio()
 
-        # Determine input rate
         if MIC_SAMPLE_RATE and MIC_SAMPLE_RATE != 0:
             self.input_rate = MIC_SAMPLE_RATE
         else:
@@ -87,7 +77,6 @@ class AudioHandler:
             self.input_rate = int(info["defaultSampleRate"])
 
         log.info("Mic idx=%d, input rate=%d Hz", self.device_index, self.input_rate)
-
         self.stream = None
         self.recording = False
 
@@ -114,17 +103,13 @@ class AudioHandler:
             log.error("Mic read error: %s", e)
             return None
 
-        # Convert to int16 array
         audio = np.frombuffer(raw, dtype=np.int16)
-
-        # Optional normalization
         if MIC_NORMALISE:
             peak = np.max(np.abs(audio)) or 1
             gain = int(0.9 * 32767 / peak)
             if gain > 1:
                 audio = np.clip(audio * gain, -32768, 32767).astype(np.int16)
 
-        # Downsample to API_SAMPLE_RATE if needed
         if self.input_rate != API_SAMPLE_RATE:
             factor = self.input_rate // API_SAMPLE_RATE
             if factor > 1:
@@ -162,12 +147,9 @@ class AudioHandler:
         self.stop_input()
         self.p.terminate()
 
-# ----------------------------------------------------------------------
-# RealtimeClient
-# ----------------------------------------------------------------------
 class RealtimeClient:
     URL = "wss://api.openai.com/v1/realtime"
-    MODEL = "gpt-4o-mini-realtime-preview"
+    MODEL = OPENAI_MODEL_REALTIME
 
     def __init__(
         self,
@@ -189,23 +171,19 @@ class RealtimeClient:
         self._text_buf = ""
         self._rec_flag = threading.Event()
 
-        # Start asyncio loop in background
         self.loop = asyncio.new_event_loop()
         threading.Thread(target=self.loop.run_forever, daemon=True).start()
 
-        # Connect to WebSocket
         self.ws = asyncio.run_coroutine_threadsafe(
             self._connect(), self.loop
         ).result()
         asyncio.run_coroutine_threadsafe(self._recv_loop(), self.loop)
 
-        # Setup GPIO polling if available
         if HAS_GPIO:
             self._setup_gpio()
         else:
             log.info("GPIO not available; hardware button disabled")
 
-    # ---------------- WebSocket -----------------------
     async def _connect(self):
         ssl_ctx = ssl.create_default_context()
         ssl_ctx.check_hostname = False
@@ -228,7 +206,7 @@ class RealtimeClient:
                 "input_audio_format": "pcm16",
                 "output_audio_format": "pcm16",
                 "turn_detection": None,
-                "input_audio_transcription": {"model": "whisper-1"},
+                "input_audio_transcription": {"model": OPENAI_MODEL_TRANSCRIPTION},
                 "temperature": 0.6,
             }
         }))
@@ -286,7 +264,6 @@ class RealtimeClient:
         }))
         await self.ws.send(json.dumps({"type": "response.create"}))
 
-    # ---------------- public API -----------------------
     def start_talking(self):
         if not self._rec_flag.is_set():
             self._rec_flag.set()
@@ -309,12 +286,10 @@ class RealtimeClient:
         if HAS_GPIO:
             GPIO.cleanup((GPIO_BUTTON_PIN, GPIO_LED_PIN))
 
-    # ---------------- GPIO polling ---------------------
     def _setup_gpio(self):
         GPIO.setmode(GPIO.BCM)
         GPIO.setup(GPIO_LED_PIN, GPIO.OUT, initial=GPIO.LOW)
-        GPIO.setup(GPIO_BUTTON_PIN, GPIO.IN)  # external pull-down
-
+        GPIO.setup(GPIO_BUTTON_PIN, GPIO.IN)
         threading.Thread(target=self._poll_button, daemon=True).start()
         log.info("GPIO polling thread started (button %d, LED %d)",
                  GPIO_BUTTON_PIN, GPIO_LED_PIN)
@@ -323,7 +298,7 @@ class RealtimeClient:
         last = GPIO.input(GPIO_BUTTON_PIN)
         while True:
             cur = GPIO.input(GPIO_BUTTON_PIN)
-            if not last and cur:  # LOW->HIGH
+            if not last and cur:
                 if self._rec_flag.is_set():
                     self.stop_talking()
                     GPIO.output(GPIO_LED_PIN, GPIO.LOW)
@@ -332,19 +307,3 @@ class RealtimeClient:
                     GPIO.output(GPIO_LED_PIN, GPIO.HIGH)
             last = cur
             threading.Event().wait(0.05)
-
-# ----------------------------------------------------------------------
-# Standalone test
-# ----------------------------------------------------------------------
-if __name__ == "__main__":
-    def print_text(msg): print("TEX:", msg)
-
-    client = RealtimeClient(
-        INSTRUCTIONS, voice="ash",
-        mic_index=MIC_DEVICE_INDEX,
-        on_text=print_text
-    )
-    try:
-        asyncio.get_event_loop().run_forever()
-    except KeyboardInterrupt:
-        client.close()
