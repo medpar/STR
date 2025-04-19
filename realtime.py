@@ -85,7 +85,7 @@ class AudioHandler:
             self.stop_input()
         self.stream = self.p.open(
             format=self.fmt,
-            channels=self.channels,
+            #channels=self.channels,
             rate=self.input_rate,
             input=True,
             frames_per_buffer=self.chunk,
