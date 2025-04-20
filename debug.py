@@ -1,18 +1,24 @@
 #!/usr/bin/env python3
 """
 Simplified Debug endpoints: tone, LED, button, mic start/stop.
+Ensures correct sample rate metadata in saved WAV files.
 """
 
-import os, time, threading, logging, wave
-from flask import Blueprint, jsonify, request # Added request back
+import os
+import time
+import threading
+import logging
+import wave
+from flask import Blueprint, jsonify, request
+from pydub import AudioSegment, exceptions as pydub_exceptions
 from pydub.generators import Sine
 import pyaudio
 
 from config import (
-    GPIO_LED_PIN, GPIO_BUTTON_PIN, BUTTON_ACTIVE_HIGH, ENABLE_GPIO, # Added ENABLE_GPIO
+    GPIO_LED_PIN, GPIO_BUTTON_PIN, BUTTON_ACTIVE_HIGH, ENABLE_GPIO,
     MIC_DEVICE_INDEX, MIC_SAMPLE_RATE, MIC_CHANNELS, MIC_CHUNK
 )
-# Removed audio_manager import here, play_audio call removed from mic_stop
+from audio_manager import play_audio # Re-import for tone playback
 
 log = logging.getLogger("debug") # Use specific logger
 
@@ -21,20 +27,22 @@ HAS_GPIO = False
 if ENABLE_GPIO:
     try:
         import RPi.GPIO as GPIO
+        GPIO.setwarnings(False) # Suppress channel already in use warnings
         GPIO.setmode(GPIO.BCM)
         # Setup pins only if they are valid (e.g., > 0)
         if GPIO_LED_PIN > 0:
              GPIO.setup(GPIO_LED_PIN, GPIO.OUT, initial=GPIO.LOW)
         if GPIO_BUTTON_PIN > 0:
-             # Determine pull resistor based on active high/low
              pull_resistor = GPIO.PUD_UP if not BUTTON_ACTIVE_HIGH else GPIO.PUD_DOWN
              GPIO.setup(GPIO_BUTTON_PIN, GPIO.IN, pull_up_down=pull_resistor)
         HAS_GPIO = True
         log.info("GPIO initialized for debug.")
     except Exception as e:
-        # Catch specific ImportErrors or RuntimeErrors if needed, or general Exception
         log.warning(f"GPIO initialization failed in debug: {e}. Debug Button/LED disabled.")
         HAS_GPIO = False # Ensure it's False on error
+else:
+    log.info("GPIO disabled by configuration or platform.")
+
 
 bp = Blueprint("debug", __name__, url_prefix="/api/debug")
 
@@ -42,45 +50,46 @@ bp = Blueprint("debug", __name__, url_prefix="/api/debug")
 _recording_thread = None
 _recording_active = threading.Event() # Use Event for clearer signaling
 _frames = []
-_pa = None
-_stream = None
-_mic_rate = 0 # Store sample rate used for recording
+_pa_debug = None # Use separate instance for debug mic? Might avoid conflicts.
+_stream_debug = None
+_mic_rate_debug = 0 # Store sample rate used for recording
 
-def _mic_worker():
-    """Dedicated thread for reading audio frames."""
-    global _frames, _stream
-    log.info("Mic recording worker thread started.")
-    while _recording_active.is_set() and _stream and _stream.is_active():
+def _mic_worker_debug():
+    """Dedicated thread for reading audio frames for debug recording."""
+    global _frames, _stream_debug
+    log.info("Debug Mic recording worker thread started.")
+    frames_this_run = [] # Collect frames locally first
+    while _recording_active.is_set() and _stream_debug and _stream_debug.is_active():
         try:
-            data = _stream.read(MIC_CHUNK, exception_on_overflow=False)
-            _frames.append(data)
+            data = _stream_debug.read(MIC_CHUNK, exception_on_overflow=False)
+            if data:
+                 frames_this_run.append(data)
         except OSError as e:
-            # Handle specific recoverable errors like overflow differently if needed
              if "Input overflowed" in str(e):
-                  log.warning("Mic input overflow detected in debug worker.")
-                  # Optionally skip frame or short sleep: time.sleep(0.01)
+                  log.warning("Debug Mic input overflow detected.")
              else:
-                  log.error(f"Mic read OS error in debug worker: {e}")
+                  log.error(f"Debug Mic read OS error in worker: {e}")
                   _recording_active.clear() # Signal stop on error
-                  break # Exit loop on significant error
+                  break
         except Exception as e:
-            log.exception("Unexpected error in mic recording worker.")
+            log.exception("Unexpected error in debug mic recording worker.")
             _recording_active.clear() # Signal stop on error
-            break # Exit loop
-    log.info("Mic recording worker thread finished.")
+            break
+
+    # Append collected frames to global list *after* loop finishes or is stopped
+    # This might be slightly safer if multiple threads access _frames, though unlikely here.
+    _frames.extend(frames_this_run)
+    log.info(f"Debug Mic recording worker thread finished. Collected {len(frames_this_run)} frames.")
+
 
 @bp.route("/tone", methods=["POST"])
 def tone():
     """
-    Generate and save a sine tone WAV file. Returns the URL.
+    Generate and save a sine tone WAV file. Plays it and returns the URL.
     Query args: frequency (Hz), duration (ms)
     """
-    # Need to re-import play_audio here if we want to play it from backend
-    from audio_manager import play_audio
     freq = float(request.args.get("frequency", 440))
-    # Expect duration in milliseconds for pydub
     dur_ms = int(request.args.get("duration", 500)) # Default 500ms
-    # Create audio_files directory if it doesn't exist
     audio_dir = os.path.join(os.getcwd(), "audio_files")
     os.makedirs(audio_dir, exist_ok=True)
 
@@ -89,45 +98,40 @@ def tone():
 
     try:
         log.info(f"Generating tone: {freq} Hz, {dur_ms} ms")
-        # Generate tone using pydub
         sine_wave = Sine(freq)
-        # Duration is in milliseconds
         audio_segment = sine_wave.to_audio_segment(duration=dur_ms)
-        # Export as WAV
+        # Export as WAV (ensure 16-bit for wider compatibility)
+        audio_segment = audio_segment.set_sample_width(2)
         audio_segment.export(path, format="wav")
         log.info(f"Tone saved to {path}")
 
-        # --- Play the generated tone ---
-        # Since play_audio runs in the main thread (or spawns its own),
-        # this POST request will wait until playback finishes.
-        log.info("Playing generated tone...")
-        play_audio(path) # Call the playback function
+        # Play the generated tone using audio_manager
+        log.info("Playing generated tone via audio_manager...")
+        # This runs in the main Flask thread, blocking the request until done
+        # Consider running in a separate thread if immediate response is needed
+        play_audio(path)
         log.info("Finished playing tone.")
-        # --- ---
 
         return jsonify({"status": "Tone generated and played", "audio_url": f"/audio_files/{fname}"})
     except Exception as e:
         log.exception("Error generating or playing tone.")
         return jsonify({"error": f"Failed to process tone: {e}"}), 500
 
-
 @bp.route("/led", methods=["POST"])
 def led():
-    """Blink the LED 3× at 0.5s intervals. Requires valid LED pin."""
+    """Blink the LED 3×. Requires valid LED pin and GPIO enabled."""
     if not HAS_GPIO or GPIO_LED_PIN <= 0:
         return jsonify({"error": "GPIO not available or LED pin not configured"}), 400
 
     def _blink():
         log.info(f"Blinking LED on pin {GPIO_LED_PIN}")
-        original_state = GPIO.input(GPIO_LED_PIN)
         try:
+            # Store original state if needed, but usually we force LOW at end
             for _ in range(3):
                 GPIO.output(GPIO_LED_PIN, GPIO.HIGH)
-                time.sleep(0.25) # Faster blink
+                time.sleep(0.25)
                 GPIO.output(GPIO_LED_PIN, GPIO.LOW)
                 time.sleep(0.25)
-            # Optional: restore original state, though usually we want it LOW
-            GPIO.output(GPIO_LED_PIN, GPIO.LOW)
             log.info("LED blink finished.")
         except Exception as e:
              log.error(f"Error during LED blink thread: {e}")
@@ -135,23 +139,19 @@ def led():
              try: GPIO.output(GPIO_LED_PIN, GPIO.LOW)
              except Exception: pass
 
-
     threading.Thread(target=_blink, daemon=True).start()
     return jsonify({"status": "LED blink sequence started"})
 
 @bp.route("/button", methods=["GET"])
 def button():
-    """Read current button state. Requires valid button pin."""
+    """Read current button state. Requires valid button pin and GPIO enabled."""
     if not HAS_GPIO or GPIO_BUTTON_PIN <= 0:
         return jsonify({"error": "GPIO not available or Button pin not configured"}), 400
     try:
         raw = GPIO.input(GPIO_BUTTON_PIN)
-        # Logic depends on whether button connects to GND (active low) or 3.3V (active high)
-        # and the pull resistor used in setup.
-        # If Active Low (connects to GND) & PUD_UP: raw is 0 when pressed.
-        # If Active High (connects to 3.3V) & PUD_DOWN: raw is 1 when pressed.
-        pressed = (raw == 0) if not BUTTON_ACTIVE_HIGH else (raw == 1)
-        log.debug(f"Button pin {GPIO_BUTTON_PIN} read: raw={raw}, pressed={pressed}")
+        # Logic based on config's BUTTON_ACTIVE_HIGH
+        pressed = (raw == 1) if BUTTON_ACTIVE_HIGH else (raw == 0)
+        log.debug(f"Button pin {GPIO_BUTTON_PIN} read: raw={raw}, pressed={pressed} (Active High={BUTTON_ACTIVE_HIGH})")
         return jsonify({"pressed": pressed})
     except Exception as e:
         log.error(f"Error reading button state: {e}")
@@ -161,103 +161,121 @@ def button():
 @bp.route("/mic/start", methods=["POST"])
 def mic_start():
     """Begin recording audio indefinitely until /mic/stop is called."""
-    global _recording_thread, _frames, _pa, _stream, _mic_rate
+    global _recording_thread, _frames, _pa_debug, _stream_debug, _mic_rate_debug
 
     if _recording_active.is_set():
-        log.warning("Mic start requested, but already recording.")
+        log.warning("Debug Mic start requested, but already recording.")
         return jsonify({"error": "Already recording"}), 400
 
     _frames = [] # Clear previous frames
-    _recording_active.set() # Signal worker to start/continue
+    _mic_rate_debug = 0 # Reset rate
 
     try:
-        _pa = pyaudio.PyAudio()
-        # Determine sample rate: Use config if set, else device default
-        device_info = _pa.get_device_info_by_index(MIC_DEVICE_INDEX)
-        _mic_rate = MIC_SAMPLE_RATE if MIC_SAMPLE_RATE > 0 else int(device_info["defaultSampleRate"])
+        _pa_debug = pyaudio.PyAudio()
+        device_info = _pa_debug.get_device_info_by_index(MIC_DEVICE_INDEX)
+        _mic_rate_debug = MIC_SAMPLE_RATE if MIC_SAMPLE_RATE > 0 else int(device_info["defaultSampleRate"])
 
-        log.info(f"Starting mic recording: Index={MIC_DEVICE_INDEX}, Rate={_mic_rate}, Channels={MIC_CHANNELS}")
-        _stream = _pa.open(
-            format=pyaudio.paInt16,
+        if _mic_rate_debug <= 0:
+             raise ValueError(f"Invalid mic rate detected: {_mic_rate_debug}")
+
+        log.info(f"Starting Debug Mic recording: Index={MIC_DEVICE_INDEX}, Rate={_mic_rate_debug} Hz, Channels={MIC_CHANNELS}")
+        _stream_debug = _pa_debug.open(
+            format=pyaudio.paInt16, # Use 16-bit PCM
             channels=MIC_CHANNELS,
-            rate=_mic_rate,
+            rate=_mic_rate_debug,
             input=True,
             frames_per_buffer=MIC_CHUNK,
             input_device_index=MIC_DEVICE_INDEX,
-            stream_callback=None # Using blocking read in worker thread
+            stream_callback=None # Use blocking read in worker thread
         )
-        _stream.start_stream() # Ensure stream is active
+        # Don't necessarily need start_stream() with blocking read, but ensures it's ready
+        _stream_debug.start_stream()
+
+        _recording_active.set() # Signal worker to start
 
         # Start the dedicated worker thread
-        _recording_thread = threading.Thread(target=_mic_worker, daemon=True)
+        _recording_thread = threading.Thread(target=_mic_worker_debug, daemon=True)
         _recording_thread.start()
 
-        log.info("Mic recording started successfully.")
+        log.info("Debug Mic recording started successfully.")
         return jsonify({"status": "Recording started"})
 
     except Exception as e:
-        log.exception("Failed to start microphone recording.")
-        _recording_active.clear() # Ensure flag is cleared on error
-        # Cleanup partial resources if necessary
-        if _stream:
+        log.exception("Failed to start Debug Mic recording.")
+        _recording_active.clear()
+        # Cleanup partial resources
+        if _stream_debug:
             try:
-                 if _stream.is_active(): _stream.stop_stream()
-                 _stream.close()
+                 if _stream_debug.is_active(): _stream_debug.stop_stream()
+                 _stream_debug.close()
             except Exception: pass
-            _stream = None
-        if _pa:
-            try: _pa.terminate()
+            _stream_debug = None
+        if _pa_debug:
+            try: _pa_debug.terminate()
             except Exception: pass
-            _pa = None
+            _pa_debug = None
+        _mic_rate_debug = 0
         return jsonify({"error": f"Failed to start recording: {e}"}), 500
 
 
 @bp.route("/mic/stop", methods=["POST"])
 def mic_stop():
-    """Stop recording, save the WAV file, and return its URL."""
-    global _recording_thread, _frames, _pa, _stream, _mic_rate
+    """Stop recording, save the WAV file with correct metadata, and return its URL."""
+    global _recording_thread, _frames, _pa_debug, _stream_debug, _mic_rate_debug
 
     if not _recording_active.is_set():
-        log.warning("Mic stop requested, but not recording.")
+        # If already stopped but called again, maybe just return status?
+        # For now, treat as error if not actively recording.
+        log.warning("Debug Mic stop requested, but not recording.")
         return jsonify({"error": "Not recording"}), 400
 
-    log.info("Stopping mic recording...")
+    log.info("Stopping Debug Mic recording...")
     _recording_active.clear() # Signal worker thread to stop
 
-    # Wait for the worker thread to finish processing the last chunks
+    # Wait for the worker thread to finish
     if _recording_thread and _recording_thread.is_alive():
-        log.debug("Waiting for recording thread to finish...")
-        _recording_thread.join(timeout=1.0) # Wait up to 1 second
+        log.debug("Waiting for debug recording thread to finish...")
+        _recording_thread.join(timeout=1.5) # Slightly longer timeout
         if _recording_thread.is_alive():
-             log.warning("Recording thread did not finish cleanly.")
+             log.warning("Debug recording thread did not finish cleanly.")
         _recording_thread = None
 
-    # Close and terminate PyAudio resources
-    if _stream:
+    # Close and terminate PyAudio resources (use the _debug versions)
+    if _stream_debug:
         try:
-            if _stream.is_active():
-                 _stream.stop_stream()
-            _stream.close()
-            log.debug("Mic stream closed.")
+            # Check if active before stopping
+            if _stream_debug.is_active():
+                 _stream_debug.stop_stream()
+            _stream_debug.close()
+            log.debug("Debug Mic stream closed.")
         except Exception as e:
-            log.error(f"Error closing mic stream: {e}")
+            log.error(f"Error closing debug mic stream: {e}")
         finally:
-             _stream = None # Ensure it's cleared
+             _stream_debug = None
 
-    if _pa:
+    if _pa_debug:
         try:
-            _pa.terminate()
-            log.debug("PyAudio instance terminated.")
+            _pa_debug.terminate()
+            log.debug("Debug PyAudio instance terminated.")
         except Exception as e:
-            log.error(f"Error terminating PyAudio: {e}")
+            log.error(f"Error terminating debug PyAudio: {e}")
         finally:
-            _pa = None # Ensure it's cleared
+            _pa_debug = None
 
+    # --- Save the recorded frames ---
+    # Check frames *after* resource cleanup
     if not _frames:
         log.warning("Recording stopped, but no frames were captured.")
+        # Reset rate even if no frames
+        _mic_rate_debug = 0
         return jsonify({"error": "No audio data recorded"}), 400
 
-    # Save the recorded frames to a WAV file
+    # Check if rate is valid before saving
+    if _mic_rate_debug <= 0:
+         log.error("Cannot save WAV file: Invalid microphone sample rate captured during start.")
+         _frames = [] # Clear frames
+         return jsonify({"error": "Internal error: Invalid sample rate for saving."}), 500
+
     audio_dir = os.path.join(os.getcwd(), "audio_files")
     os.makedirs(audio_dir, exist_ok=True)
     ts = int(time.time())
@@ -265,21 +283,23 @@ def mic_stop():
     path = os.path.join(audio_dir, fname)
 
     try:
-        log.info(f"Saving recording to {path} (Rate: {_mic_rate}, Channels: {MIC_CHANNELS})")
+        log.info(f"Saving debug recording to {path} (Rate: {_mic_rate_debug} Hz, Channels: {MIC_CHANNELS}, Width: 16-bit)")
         wf = wave.open(path, "wb")
         wf.setnchannels(MIC_CHANNELS)
-        # Use sample width from PyAudio format paInt16 (which is 2 bytes)
-        wf.setsampwidth(pyaudio.PyAudio().get_sample_size(pyaudio.paInt16))
-        wf.setframerate(_mic_rate if _mic_rate > 0 else 44100) # Use recorded rate, fallback if somehow 0
+        # Get sample width corresponding to paInt16 (2 bytes)
+        sample_width = pyaudio.PyAudio().get_sample_size(pyaudio.paInt16)
+        wf.setsampwidth(sample_width)
+        wf.setframerate(_mic_rate_debug) # Use the **actual recording rate**
         wf.writeframes(b"".join(_frames))
         wf.close()
-        log.info(f"Recording saved successfully: {fname}")
-        # Clear frames now that they are saved
-        _frames = []
-        # DO NOT PLAY AUDIO HERE - Just return URL
+        log.info(f"Debug recording saved successfully: {fname}")
+
         return jsonify({"status": "Recording stopped and saved", "audio_url": f"/audio_files/{fname}"})
 
     except Exception as e:
-        log.exception("Failed to save microphone recording.")
-        _frames = [] # Clear frames even on error
+        log.exception("Failed to save debug microphone recording.")
         return jsonify({"error": f"Failed to save recording: {e}"}), 500
+    finally:
+        # Clear frames and reset rate regardless of save success/failure
+        _frames = []
+        _mic_rate_debug = 0

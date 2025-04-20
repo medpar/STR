@@ -18,6 +18,10 @@ if not log_config.hasHandlers():
     handler.setFormatter(formatter)
     log_config.addHandler(handler)
     log_config.propagate = False # Prevent duplicate messages if root logger also has handler
+else:
+     # If already configured (e.g., by app.py basicConfig), ensure level is appropriate
+     log_config.setLevel(logging.INFO)
+
 
 # --- Device Detection Helper ---
 def find_device_by_name_fragment(p, name_fragments, is_input=True, threshold=0):
@@ -215,12 +219,14 @@ BUTTON_ACTIVE_HIGH: bool = os.getenv("BUTTON_ACTIVE_HIGH", "False").lower() in (
 _IS_RPI = False
 if sys.platform == "linux":
      try:
+          # Check for Raspberry Pi specific entries in cpuinfo
           with open('/proc/cpuinfo', 'r') as f:
-               for line in f:
-                    if line.startswith('Hardware') and ('BCM' in line or 'Raspberry Pi' in line):
-                         _IS_RPI = True
-                         break
+               cpuinfo = f.read()
+               if 'Raspberry Pi' in cpuinfo or 'BCM2708' in cpuinfo or 'BCM2709' in cpuinfo or 'BCM2835' in cpuinfo or 'BCM2836' in cpuinfo or 'BCM2837' in cpuinfo or 'BCM2711' in cpuinfo:
+                   _IS_RPI = True
+
           if _IS_RPI:
+              # Try importing RPi.GPIO only if detected as RPi
               import RPi.GPIO
      except (ImportError, RuntimeError, FileNotFoundError):
           _IS_RPI = False # Ensure it's False if check fails or RPi.GPIO not installed
