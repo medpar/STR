@@ -5,7 +5,7 @@ Handles audio input/output ensuring correct sample rates.
 """
 
 from __future__ import annotations
-import os, ssl, json, base64, asyncio, threading, logging, time
+import os, ssl, json, base64, asyncio, threading, logging, time, sys
 import pyaudio, numpy as np, websockets
 from typing import Callable
 
