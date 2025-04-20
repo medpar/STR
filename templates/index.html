@@ -37,7 +37,8 @@
         flex-grow: 1;
         outline: none;
         transition: border-color 0.2s ease;
-        resize: none;
+        resize: none; /* Allow resize for textarea */
+        min-height: 42px; /* Ensure consistent height */
       }
       .input-box:focus {
         border-color: #2563eb;
@@ -76,6 +77,7 @@
         display: inline-flex;
         align-items: center;
         justify-content: center;
+        height: 42px; /* Match input height */
       }
       .btn:focus {
         outline: none;
@@ -85,7 +87,7 @@
         background-color: #2563eb;
         color: white;
       }
-      .btn-primary:hover {
+      .btn-primary:hover:not(:disabled) {
         background-color: #1d4ed8;
       }
       .btn-primary:disabled {
@@ -97,7 +99,7 @@
         background-color: #6b7280;
         color: white;
       }
-      .btn-secondary:hover {
+      .btn-secondary:hover:not(:disabled) {
         background-color: #4b5563;
       }
       .btn-secondary:disabled {
@@ -109,7 +111,7 @@
         width: 100%;
         margin-top: 0.75rem;
         display: block;
-        height: 40px;
+        height: 40px; /* Standard height */
       }
       /* Tab styling */
       .tab {
@@ -119,6 +121,7 @@
         font-weight: 500;
         transition: all 0.2s ease;
         text-align: center;
+        cursor: pointer;
       }
       .tab:hover {
         color: #1d4ed8;
@@ -148,6 +151,27 @@
         align-self: center;
         margin: 0.5rem auto;
       }
+      /* Debug specific styles */
+      #micPlayback {
+        display: none;
+      } /* Hide audio player initially */
+      #micPlayback.active {
+        display: block;
+      } /* Show when active */
+
+      /* Input field height consistency */
+      #ttsInput,
+      #agentInput,
+      #realtimeText,
+      #pdfQuestion {
+        box-sizing: border-box; /* Include padding and border in height */
+      }
+      /* Specific textarea adjustments */
+      #ttsInput,
+      #agentInput {
+        min-height: 42px; /* Minimum height like buttons */
+        height: auto; /* Allow textarea to grow */
+      }
     </style>
   </head>
   <body class="bg-gray-100 text-gray-900 font-sans antialiased">
@@ -173,15 +197,17 @@
         <section id="panel-tts" class="panel chat-container">
           <div id="ttsFeed" class="chat-history"></div>
           <div
-            class="chat-input-area flex flex-col sm:flex-row gap-3 items-center"
+            class="chat-input-area flex flex-col sm:flex-row gap-3 items-start sm:items-center"
           >
+            <!-- Changed alignment -->
             <textarea
               id="ttsInput"
               class="input-box"
-              placeholder="Escribe texto…"
+              placeholder="Escribe texto (Shift+Enter para nueva línea)"
               rows="1"
             ></textarea>
-            <div class="flex gap-2 flex-shrink-0">
+            <div class="flex gap-2 flex-shrink-0 mt-2 sm:mt-0">
+              <!-- Added margin top for small screens -->
               <button id="ttsSend" class="btn btn-primary">Enviar</button>
               <button id="ttsClear" class="btn btn-secondary">Limpiar</button>
             </div>
@@ -192,15 +218,17 @@
         <section id="panel-agent" class="panel chat-container hidden">
           <div id="agentFeed" class="chat-history"></div>
           <div
-            class="chat-input-area flex flex-col sm:flex-row gap-3 items-center"
+            class="chat-input-area flex flex-col sm:flex-row gap-3 items-start sm:items-center"
           >
+            <!-- Changed alignment -->
             <textarea
               id="agentInput"
               class="input-box"
-              placeholder="Pregunta…"
+              placeholder="Pregunta (Shift+Enter para nueva línea)"
               rows="1"
             ></textarea>
-            <div class="flex gap-2 flex-shrink-0">
+            <div class="flex gap-2 flex-shrink-0 mt-2 sm:mt-0">
+              <!-- Added margin top for small screens -->
               <button id="agentSend" class="btn btn-primary">Enviar</button>
               <button id="agentClear" class="btn btn-secondary">Limpiar</button>
             </div>
@@ -215,18 +243,19 @@
           <div class="chat-input-area flex flex-col gap-4">
             <div class="flex flex-wrap gap-3 justify-center">
               <button id="startTalking" class="btn btn-primary">
-                🎙️ Start
+                🎙️ Start Mic
               </button>
               <button id="stopTalking" class="btn btn-secondary" disabled>
-                ⏹️ Stop
+                ⏹️ Stop Mic
               </button>
               <button id="rtClear" class="btn btn-secondary">Limpiar</button>
             </div>
             <div class="flex gap-3 items-center">
               <input
+                type="text"
                 id="realtimeText"
                 class="input-box"
-                placeholder="Enviar texto al aire…"
+                placeholder="Enviar texto al aire (Enter para enviar)"
               />
               <button
                 id="realtimeTextSend"
@@ -256,11 +285,9 @@
               id="pdfQA"
               class="hidden flex flex-col sm:flex-row gap-3 mt-2 items-center"
             >
-              <input
-                id="pdfQuestion"
-                class="input-box flex-grow"
-                placeholder="Pregunta sobre tu PDF…"
-              />
+              <input type="text" <!-- Changed from textarea to input -- />
+              id="pdfQuestion" class="input-box flex-grow" placeholder="Pregunta
+              sobre tu PDF (Enter para enviar)" />
               <div class="flex gap-2 flex-shrink-0">
                 <button id="pdfAsk" class="btn btn-primary">Preguntar</button>
                 <button id="pdfClear" class="btn btn-secondary">Limpiar</button>
@@ -272,50 +299,72 @@
         <!-- Debug -->
         <section id="panel-debug" class="panel chat-container hidden">
           <div id="debugFeed" class="chat-history">
-            <p class="status-message">Herramientas de depuración</p>
+            <p id="debugStatus" class="status-message">
+              Herramientas de depuración
+            </p>
           </div>
           <div class="chat-input-area flex flex-col gap-4">
             <!-- Play Tone -->
-            <div class="flex gap-2">
+            <div class="flex flex-wrap gap-2 items-center">
+              <span class="font-medium w-20 text-right">Tono:</span>
               <input
                 type="number"
                 id="toneFreq"
-                class="input-box w-24"
+                class="input-box w-24 flex-shrink-0"
                 placeholder="Hz"
                 value="440"
               />
               <input
                 type="number"
                 id="toneDur"
-                class="input-box w-24"
+                class="input-box w-24 flex-shrink-0"
                 placeholder="ms"
                 value="500"
               />
-              <button id="tonePlay" class="btn btn-primary">
+              <button id="tonePlay" class="btn btn-primary flex-shrink-0">
                 Reproducir Tono
               </button>
             </div>
             <!-- LED -->
-            <div class="flex gap-2">
-              <button id="ledTest" class="btn btn-secondary">Test LED</button>
+            <div class="flex flex-wrap gap-2 items-center">
+              <span class="font-medium w-20 text-right">LED:</span>
+              <button id="ledTest" class="btn btn-secondary flex-shrink-0">
+                Test LED
+              </button>
             </div>
             <!-- Button State -->
-            <div class="flex gap-2 items-center">
-              <button id="btnState" class="btn btn-secondary">
+            <div class="flex flex-wrap gap-2 items-center">
+              <span class="font-medium w-20 text-right">Botón:</span>
+              <button id="btnState" class="btn btn-secondary flex-shrink-0">
                 Leer Botón
               </button>
-              <span id="btnResult" class="font-medium"></span>
+              <span id="btnResult" class="font-medium text-gray-700"></span>
             </div>
             <!-- Mic Record -->
-            <div class="flex gap-2">
-              <input
-                type="number"
-                id="micDur"
-                class="input-box w-24"
-                placeholder="seg"
-                value="3"
-              />
-              <button id="micRec" class="btn btn-primary">Grabar Mic</button>
+            <div class="flex flex-wrap gap-2 items-center">
+              <span class="font-medium w-20 text-right">Mic:</span>
+              <button id="micStart" class="btn btn-primary flex-shrink-0">
+                ⏺️ Start Rec
+              </button>
+              <button
+                id="micStop"
+                class="btn btn-secondary flex-shrink-0"
+                disabled
+              >
+                ⏹️ Stop Rec
+              </button>
+            </div>
+            <!-- Mic Playback -->
+            <div class="flex flex-wrap gap-2 items-center">
+              <span class="font-medium w-20 text-right">Audio:</span>
+              <div class="flex-grow">
+                <!-- Container for player -->
+                <audio id="micPlayback" controls class="w-full"></audio>
+                <span
+                  id="micPlaybackStatus"
+                  class="text-sm text-gray-500 italic"
+                ></span>
+              </div>
             </div>
           </div>
         </section>
@@ -329,19 +378,40 @@
 
       function showToast(message, type = "info") {
         console.log(`TOAST (${type}): ${message}`);
+        const toastContainer = el("#toast-container") || createToastContainer();
         const toast = document.createElement("div");
         toast.textContent = message;
-        toast.className = `fixed bottom-5 right-5 p-3 rounded-lg shadow-md text-white ${
+        toast.className = `p-3 rounded-lg shadow-md text-white text-sm mb-2 transform transition-all duration-300 ease-out ${
           type === "error"
-            ? "bg-red-500"
+            ? "bg-red-600"
             : type === "success"
-            ? "bg-green-500"
-            : "bg-blue-500"
+            ? "bg-green-600"
+            : "bg-blue-600"
         }`;
-        document.body.appendChild(toast);
+        toast.style.opacity = "0"; // Start transparent
+        toast.style.transform = "translateY(20px)"; // Start lower
+
+        toastContainer.insertBefore(toast, toastContainer.firstChild); // Add new toasts at the top
+
+        // Animate in
+        requestAnimationFrame(() => {
+          toast.style.opacity = "1";
+          toast.style.transform = "translateY(0)";
+        });
+
+        // Auto-remove
         setTimeout(() => {
-          toast.remove();
-        }, 3000);
+          toast.style.opacity = "0";
+          toast.style.transform = "translateY(-20px)"; // Animate out upwards
+          toast.addEventListener("transitionend", () => toast.remove());
+        }, 3500);
+      }
+      function createToastContainer() {
+        const container = document.createElement("div");
+        container.id = "toast-container";
+        container.className = "fixed bottom-5 right-5 z-50 w-64"; // Position & size
+        document.body.appendChild(container);
+        return container;
       }
 
       const feedClear = (feedSel, statusSel = null, initialMsg = "") => {
@@ -351,13 +421,17 @@
         if (statusSel) {
           const statusElement = el(statusSel);
           if (statusElement) {
-            if (feed.contains(statusElement)) {
+            // Check if the status element is *supposed* to be inside the feed
+            const isChild = statusElement.closest(feedSel);
+            if (isChild) {
+              // Recreate it if it's meant to be inside
               const p = document.createElement("p");
-              p.id = statusElement.id;
+              p.id = statusElement.id; // Keep the original ID
               p.className = "status-message";
               p.textContent = initialMsg;
               feed.appendChild(p);
             } else {
+              // Update it if it's outside the feed
               statusElement.textContent = initialMsg;
             }
           }
@@ -367,28 +441,26 @@
       function appendBubble(feedSel, text, who, audioUrl = null) {
         const feed = el(feedSel);
         if (!feed) return;
+        // Remove initial status message if present
         const statusMsg = feed.querySelector(".status-message");
-        if (
-          statusMsg &&
-          feed.children.length === 1 &&
-          feed.firstChild === statusMsg
-        ) {
-          statusMsg.remove();
-        }
+        if (statusMsg) statusMsg.remove();
+
         const bubbleDiv = document.createElement("div");
-        bubbleDiv.className = `bubble ${who}`;
+        bubbleDiv.className = `bubble ${who} flex flex-col`; // Flex column for text + audio
         const textNode = document.createElement("p");
         textNode.textContent = text;
         bubbleDiv.appendChild(textNode);
+
         if (audioUrl) {
           try {
             const audio = document.createElement("audio");
             audio.controls = true;
-            audio.preload = "metadata";
+            audio.preload = "metadata"; // Don't load full audio until played
             audio.src = audioUrl;
-            audio.className = "mt-2 w-full";
+            audio.className = "mt-2 w-full"; // Style the audio player
             bubbleDiv.appendChild(audio);
-          } catch {
+          } catch (e) {
+            console.error("Error creating audio element:", e);
             const errorP = document.createElement("p");
             errorP.className = "text-red-500 text-xs mt-1";
             errorP.textContent = "Could not load audio player.";
@@ -396,16 +468,25 @@
           }
         }
         feed.appendChild(bubbleDiv);
+        // Scroll to bottom smoothly after the element is added
         requestAnimationFrame(() => {
           feed.scrollTo({ top: feed.scrollHeight, behavior: "smooth" });
         });
       }
 
       async function apiCall(endpoint, method = "POST", body = null) {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 second timeout
+
         try {
-          const options = { method, headers: {} };
+          const options = {
+            method,
+            headers: {},
+            signal: controller.signal, // Add abort signal
+          };
           if (body) {
             if (body instanceof FormData) {
+              // Let browser set Content-Type for FormData
               options.body = body;
             } else {
               options.headers["Content-Type"] = "application/json";
@@ -413,24 +494,48 @@
             }
           }
           const response = await fetch(endpoint, options);
+          clearTimeout(timeoutId); // Clear timeout if fetch succeeds
+
           let data;
           const contentType = response.headers.get("content-type");
           if (contentType && contentType.includes("application/json")) {
             data = await response.json();
           } else {
+            // Handle non-JSON responses (e.g., plain text errors)
             const text = await response.text();
+            // Synthesize a JSON-like structure for consistency
             data = {
               success: response.ok,
-              error: text || `HTTP ${response.status}`,
+              status_text: text || response.statusText,
             };
+            if (!response.ok) {
+              data.error = data.status_text; // Assign text as error message
+            }
           }
+          // Ensure 'success' property reflects HTTP status
           if (data.success === undefined) data.success = response.ok;
-          if (!response.ok && !data.error)
-            data.error = data.message || `HTTP ${response.status}`;
+          // Standardize error message reporting
+          if (!response.ok && !data.error) {
+            data.error =
+              data.message ||
+              data.status_text ||
+              `HTTP Error ${response.status}`;
+          }
           return data;
         } catch (err) {
+          clearTimeout(timeoutId); // Clear timeout on error too
           console.error(`API call to ${endpoint} failed:`, err);
-          return { success: false, error: err.message };
+          // Handle specific AbortError for timeouts
+          if (err.name === "AbortError") {
+            return {
+              success: false,
+              error: "Request timed out after 15 seconds.",
+            };
+          }
+          return {
+            success: false,
+            error: err.message || "Network or script error",
+          };
         }
       }
 
@@ -441,14 +546,60 @@
         tab.onclick = () => {
           tabs.forEach((t) => t.classList.remove("active"));
           tab.classList.add("active");
-          const target = `panel-${tab.dataset.tab}`;
+          const targetPanelId = `panel-${tab.dataset.tab}`;
           panels.forEach((p) => {
-            p.id === target
-              ? p.classList.remove("hidden")
-              : p.classList.add("hidden");
+            p.classList.toggle("hidden", p.id !== targetPanelId);
           });
         };
       });
+
+      /* ====================================================== */
+      /*                Input Handling & Submission             */
+      /* ====================================================== */
+
+      function setupEnterKeySubmission(inputId, buttonId, isTextarea = false) {
+        const inputElement = el(inputId);
+        const buttonElement = el(buttonId);
+        if (!inputElement || !buttonElement) {
+          console.warn(`Setup failed: Cannot find ${inputId} or ${buttonId}`);
+          return;
+        }
+
+        inputElement.addEventListener("keydown", (event) => {
+          if (event.key === "Enter") {
+            if (isTextarea) {
+              // For textareas, only submit if Shift is NOT pressed
+              if (!event.shiftKey) {
+                event.preventDefault(); // Prevent newline
+                buttonElement.click(); // Trigger button click
+              }
+              // If Shift is pressed, allow default newline behavior
+            } else {
+              // For regular inputs, always submit on Enter
+              event.preventDefault(); // Prevent potential form submission if wrapped
+              buttonElement.click(); // Trigger button click
+            }
+          }
+        });
+
+        // Auto-resize textarea height
+        if (isTextarea) {
+          inputElement.addEventListener("input", () => {
+            inputElement.style.height = "auto"; // Reset height
+            inputElement.style.height = `${inputElement.scrollHeight}px`; // Set to scroll height
+          });
+        }
+      }
+
+      // --- Setup Enter Key for all relevant inputs ---
+      setupEnterKeySubmission("#ttsInput", "#ttsSend", true); // Textarea
+      setupEnterKeySubmission("#agentInput", "#agentSend", true); // Textarea
+      setupEnterKeySubmission("#realtimeText", "#realtimeTextSend", false); // Input
+      setupEnterKeySubmission("#pdfQuestion", "#pdfAsk", false); // Input
+
+      /* ====================================================== */
+      /*                      Tab Logic                         */
+      /* ====================================================== */
 
       /* TTS */
       const ttsInput = el("#ttsInput"),
@@ -459,12 +610,20 @@
         if (!txt) return;
         appendBubble(ttsFeed, txt, "user");
         ttsInput.value = "";
+        ttsInput.style.height = "auto"; // Reset height after sending
         ttsInput.focus();
         ttsSendBtn.disabled = true;
         const res = await apiCall("/api/tts", "POST", { text: txt });
-        if (res.success && res.message)
+        if (res.success && res.message) {
           appendBubble(ttsFeed, res.message, "bot", res.audio_url);
-        else appendBubble(ttsFeed, `Error: ${res.error}`, "bot");
+        } else {
+          appendBubble(
+            ttsFeed,
+            `Error: ${res.error || "Unknown TTS error"}`,
+            "bot"
+          );
+          showToast(`TTS Error: ${res.error || "Unknown"}`, "error");
+        }
         ttsSendBtn.disabled = false;
       };
       el("#ttsClear").onclick = () => feedClear(ttsFeed);
@@ -478,12 +637,20 @@
         if (!q) return;
         appendBubble(agentFeed, q, "user");
         agentInput.value = "";
+        agentInput.style.height = "auto"; // Reset height after sending
         agentInput.focus();
         agentSendBtn.disabled = true;
         const res = await apiCall("/api/agent", "POST", { query: q });
-        if (res.success && res.message)
+        if (res.success && res.message) {
           appendBubble(agentFeed, res.message, "bot", res.audio_url);
-        else appendBubble(agentFeed, `Error: ${res.error}`, "bot");
+        } else {
+          appendBubble(
+            agentFeed,
+            `Error: ${res.error || "Unknown agent error"}`,
+            "bot"
+          );
+          showToast(`Agent Error: ${res.error || "Unknown"}`, "error");
+        }
         agentSendBtn.disabled = false;
       };
       el("#agentClear").onclick = () => feedClear(agentFeed);
@@ -507,39 +674,59 @@
         rtText.focus();
         socket.emit("send_text", { text: m });
       };
+      // Socket.IO listeners for realtime
       socket.on("status", (d) => {
         rtStatus.textContent = d.message;
         if (d.message === "Recording…") {
           startBtn.disabled = true;
           stopBtn.disabled = false;
+          rtTextSend.disabled = true; // Disable text send while mic is active? Optional.
         } else if (d.message === "Ready" || d.message.startsWith("Error:")) {
           startBtn.disabled = false;
           stopBtn.disabled = true;
+          rtTextSend.disabled = false;
         } else {
+          // Processing... state
           startBtn.disabled = true;
           stopBtn.disabled = true;
+          rtTextSend.disabled = false; // Allow sending text while processing
+        }
+        // Handle specific error case
+        if (d.message.includes("Realtime Error: Service unavailable")) {
+          startBtn.disabled = true;
+          stopBtn.disabled = true;
+          rtTextSend.disabled = true;
         }
       });
       socket.on("broadcast_text", (d) => {
         appendBubble(realtimeFeed, d.message, "bot");
-        rtStatus.textContent = "Ready";
+        rtStatus.textContent = "Ready"; // Set status back to ready after broadcast
         startBtn.disabled = false;
         stopBtn.disabled = true;
+        rtTextSend.disabled = false;
       });
       socket.on("connect", () => {
+        console.log("Realtime WebSocket connected.");
         rtStatus.textContent = "Connected. Ready.";
         startBtn.disabled = false;
         stopBtn.disabled = true;
+        rtTextSend.disabled = false;
       });
-      socket.on("disconnect", () => {
-        rtStatus.textContent = "Disconnected. Please reload.";
+      socket.on("disconnect", (reason) => {
+        console.log(`Realtime WebSocket disconnected: ${reason}`);
+        rtStatus.textContent = "Disconnected. Check server.";
         startBtn.disabled = true;
         stopBtn.disabled = true;
+        rtTextSend.disabled = true;
+        showToast("Realtime connection lost.", "error");
       });
       socket.on("connect_error", (err) => {
+        console.error(`Realtime connection error: ${err.message}`);
         rtStatus.textContent = `Connection Error: ${err.message}`;
         startBtn.disabled = true;
         stopBtn.disabled = true;
+        rtTextSend.disabled = true;
+        showToast(`Realtime connection error: ${err.message}`, "error");
       });
 
       /* PDF */
@@ -554,9 +741,10 @@
       pdfFile.onchange = async () => {
         const file = pdfFile.files[0];
         if (!file) return;
-        pdfStatus.textContent = "⏳ Subiendo e indexando…";
+        pdfStatus.textContent = "⏳ Subiendo e indexando PDF…";
         pdfQA.classList.add("hidden");
         pdfAskBtn.disabled = true;
+        pdfFile.disabled = true; // Disable input while uploading
         currentPDF = null;
         const fd = new FormData();
         fd.append("file", file);
@@ -567,17 +755,26 @@
           pdfStatus.textContent = txt;
           pdfQA.classList.remove("hidden");
           pdfAskBtn.disabled = false;
+          pdfQuestion.value = ""; // Clear question field
           pdfQuestion.focus();
-          feedClear(pdfFeed, "#pdfUploadStatus", txt);
+          feedClear(pdfFeed, "#pdfUploadStatus", txt); // Clear chat, keep status
+          showToast(`PDF "${currentPDF}" cargado`, "success");
         } else {
-          pdfStatus.textContent = `⚠️ Error: ${res.error}`;
-          pdfFile.value = "";
+          pdfStatus.textContent = `⚠️ Error al cargar PDF: ${
+            res.error || "Unknown"
+          }`;
+          pdfFile.value = ""; // Clear file input
+          showToast(`Error cargando PDF: ${res.error || "Unknown"}`, "error");
         }
+        pdfFile.disabled = false; // Re-enable input
       };
       pdfAskBtn.onclick = async () => {
         const q = pdfQuestion.value.trim();
         if (!q || !currentPDF) {
-          showToast("Please enter question & ensure PDF is loaded.", "warning");
+          showToast(
+            "Escribe una pregunta y asegúrate que el PDF esté cargado.",
+            "warning"
+          );
           return;
         }
         appendBubble(pdfFeed, q, "user");
@@ -588,9 +785,19 @@
           question: q,
           filename: currentPDF,
         });
-        if (res.success && res.answer)
+        if (res.success && res.answer) {
           appendBubble(pdfFeed, res.answer, "bot", res.audio_url);
-        else appendBubble(pdfFeed, `Error: ${res.error}`, "bot");
+        } else {
+          appendBubble(
+            pdfFeed,
+            `Error: ${res.error || "Unknown PDF query error"}`,
+            "bot"
+          );
+          showToast(
+            `Error en consulta PDF: ${res.error || "Unknown"}`,
+            "error"
+          );
+        }
         pdfAskBtn.disabled = false;
       };
       pdfClearBtn.onclick = () => {
@@ -600,56 +807,119 @@
         feedClear(pdfFeed, "#pdfUploadStatus", txt);
       };
 
-      /* Debug */
-      // … after your PDF code …
       /* Debug Controls */
-      document.getElementById("tonePlay").onclick = async () => {
-        const f = +document.getElementById("toneFreq").value;
-        const d = +document.getElementById("toneDur").value;
+      const debugStatus = el("#debugStatus");
+
+      // Tone
+      el("#tonePlay").onclick = async () => {
+        const f = +el("#toneFreq").value || 440;
+        const d = +el("#toneDur").value || 500;
+        debugStatus.textContent = "Generando y reproduciendo tono...";
         const res = await apiCall(
           `/api/debug/tone?frequency=${f}&duration=${d}`,
           "POST"
         );
-        if (res.audio_url) {
-          showToast("Tone played", "success");
+        if (res.success) {
+          showToast(`Tono ${f}Hz reproducido`, "success");
+          debugStatus.textContent = `Tono ${f}Hz reproducido.`;
+        } else {
+          showToast(`Error con el tono: ${res.error}`, "error");
+          debugStatus.textContent = `Error con el tono: ${res.error}`;
         }
       };
 
-      document.getElementById("ledTest").onclick = async () => {
-        await apiCall("/api/debug/led", "POST");
-        showToast("LED blink started", "success");
+      // LED
+      el("#ledTest").onclick = async () => {
+        debugStatus.textContent = "Probando LED...";
+        const res = await apiCall("/api/debug/led", "POST");
+        if (res.success) {
+          showToast("Secuencia LED iniciada", "success");
+          debugStatus.textContent = "Secuencia LED iniciada.";
+        } else {
+          showToast(`Error de LED: ${res.error}`, "error");
+          debugStatus.textContent = `Error de LED: ${res.error}`;
+        }
       };
 
-      document.getElementById("btnState").onclick = async () => {
+      // Button State
+      el("#btnState").onclick = async () => {
+        debugStatus.textContent = "Leyendo botón...";
         const res = await apiCall("/api/debug/button", "GET");
-        if (res.pressed !== undefined) {
-          document.getElementById("btnResult").textContent = res.pressed
-            ? "Pressed"
-            : "Released";
+        const btnResultSpan = el("#btnResult");
+        if (res.success && res.pressed !== undefined) {
+          btnResultSpan.textContent = res.pressed ? "Presionado" : "Suelto";
+          debugStatus.textContent = `Estado botón: ${btnResultSpan.textContent}.`;
+        } else {
+          btnResultSpan.textContent = "Error";
+          showToast(`Error leyendo botón: ${res.error}`, "error");
+          debugStatus.textContent = `Error leyendo botón: ${res.error}`;
         }
       };
 
-      const micStartBtn = document.getElementById("micStart");
-      const micStopBtn = document.getElementById("micStop");
-      const micAudio = document.getElementById("micPlayback");
+      // Mic Record Start/Stop
+      const micStartBtn = el("#micStart");
+      const micStopBtn = el("#micStop");
+      const micAudio = el("#micPlayback");
+      const micPlaybackStatus = el("#micPlaybackStatus");
 
       micStartBtn.onclick = async () => {
-        await apiCall("/api/debug/mic/start", "POST");
+        debugStatus.textContent = "Iniciando grabación...";
+        micPlaybackStatus.textContent = "";
+        micAudio.style.display = "none"; // Hide player
+        micAudio.src = ""; // Clear previous src
+
         micStartBtn.disabled = true;
-        micStopBtn.disabled = false;
-        showToast("Recording…", "info");
+        const res = await apiCall("/api/debug/mic/start", "POST");
+        if (res.success) {
+          micStopBtn.disabled = false; // Enable stop button ONLY on success
+          showToast("Grabación iniciada", "info");
+          debugStatus.textContent = "⏺️ Grabando...";
+        } else {
+          micStartBtn.disabled = false; // Re-enable start on error
+          showToast(`Error al iniciar grabación: ${res.error}`, "error");
+          debugStatus.textContent = `Error al iniciar: ${res.error}`;
+        }
       };
 
       micStopBtn.onclick = async () => {
+        debugStatus.textContent = "Deteniendo grabación...";
+        micStopBtn.disabled = true; // Disable stop while processing
         const res = await apiCall("/api/debug/mic/stop", "POST");
-        if (res.audio_url) {
+        if (res.success && res.audio_url) {
           micAudio.src = res.audio_url;
-          micAudio.play();
-          showToast("Playback ready", "success");
+          micAudio.style.display = "block"; // Show player
+          micPlaybackStatus.textContent = `Grabación guardada: ${res.audio_url
+            .split("/")
+            .pop()}`;
+          showToast("Grabación detenida y guardada", "success");
+          debugStatus.textContent =
+            "Grabación detenida. Lista para reproducir.";
+          // Optional: Auto-play -> micAudio.play();
+        } else {
+          micPlaybackStatus.textContent = `Error: ${
+            res.error || "No se pudo guardar"
+          }`;
+          showToast(
+            `Error al detener/guardar: ${res.error || "Unknown"}`,
+            "error"
+          );
+          debugStatus.textContent = `Error al detener: ${
+            res.error || "Unknown"
+          }`;
         }
+        // Always re-enable start button after stop attempt
         micStartBtn.disabled = false;
-        micStopBtn.disabled = true;
       };
+
+      // Clear Debug Feed (Optional)
+      // You could add a clear button for the debug status messages if needed.
+      // el("#debugClear").onclick = () => {
+      //     debugStatus.textContent = "Herramientas de depuración";
+      //     el("#btnResult").textContent = "";
+      //     micPlaybackStatus.textContent = "";
+      //     micAudio.style.display = 'none';
+      //     micAudio.src = '';
+      // };
     </script>
   </body>
 </html>
