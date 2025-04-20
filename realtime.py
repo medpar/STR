@@ -3,10 +3,8 @@
 Realtime speech-to-speech for STR.
 
 • Records from USB mic at 48 kHz, downsamples to 24 kHz for OpenAI streaming.
-• Streams audio or typed text to OpenAI Realtime API and plays back at 24 kHz
-  via the PCM5102 (stereo) DAC.
-• Toggles recording via web buttons or physical push‑button (GPIO17),
-  lights LED (GPIO27) while recording.
+• Streams audio or typed text to OpenAI Realtime API and plays back at OUTPUT_SAMPLE_RATE Hz stereo via the PCM5102 DAC.
+• Toggles recording via web buttons or physical push‑button (GPIO17), lights LED (GPIO27) while recording.
 • Uses external 10 kΩ pull‑down resistor on the button when available.
 """
 
@@ -40,6 +38,9 @@ from config import (
     BUTTON_ACTIVE_HIGH,
     OPENAI_MODEL_REALTIME,
     OPENAI_MODEL_TRANSCRIPTION,
+    OUTPUT_SAMPLE_RATE,
+    DAC_PYAUDIO_INDEX,
+    PLAYBACK_CHUNK,
 )
 
 logging.basicConfig(
@@ -57,8 +58,9 @@ INSTRUCTIONS = (
     "message except 'Started'. Answer briefly."
 )
 
+
 class AudioHandler:
-    """Handle mic capture at MIC_SAMPLE_RATE and playback at 24 kHz stereo."""
+    """Handle mic capture at MIC_SAMPLE_RATE and playback at OUTPUT_SAMPLE_RATE stereo."""
 
     def __init__(self, device_index: int):
         self.device_index = device_index
@@ -123,22 +125,37 @@ class AudioHandler:
         log.info("🎙️ Mic OFF")
 
     def play(self, data: bytes):
-        """Play API response audio at 24 kHz stereo via PCM5102."""
+        """Play API response audio: resample from 24 kHz mono to OUTPUT_SAMPLE_RATE stereo."""
 
         def _playback():
             try:
-                # PCM5102 is stereo; duplicate mono into both channels
+                # Load mono samples
                 samples = np.frombuffer(data, dtype=np.int16)
+                in_rate = API_SAMPLE_RATE
+                out_rate = OUTPUT_SAMPLE_RATE
+
+                # Resample if rates differ
+                if in_rate != out_rate:
+                    orig_idx = np.arange(len(samples))
+                    target_len = int(len(samples) * out_rate / in_rate)
+                    new_idx = np.linspace(0, len(samples) - 1, target_len)
+                    samples = np.interp(new_idx, orig_idx, samples).astype(np.int16)
+
+                # Mono to stereo
                 stereo = np.repeat(samples, 2)
-                out = self.p.open(
+
+                # Open playback stream
+                stream = self.p.open(
                     format=self.fmt,
-                    channels=1,
-                    rate=API_SAMPLE_RATE,
+                    channels=2,
+                    rate=out_rate,
                     output=True,
+                    output_device_index=DAC_PYAUDIO_INDEX,
+                    frames_per_buffer=PLAYBACK_CHUNK,
                 )
-                out.write(stereo.tobytes())
-                out.stop_stream()
-                out.close()
+                stream.write(stereo.tobytes())
+                stream.stop_stream()
+                stream.close()
             except Exception as e:
                 log.error("Playback error: %s", e)
 
@@ -291,8 +308,7 @@ class RealtimeClient:
         GPIO.setup(GPIO_LED_PIN, GPIO.OUT, initial=GPIO.LOW)
         GPIO.setup(GPIO_BUTTON_PIN, GPIO.IN)
         threading.Thread(target=self._poll_button, daemon=True).start()
-        log.info("GPIO polling thread started (button %d, LED %d)",
-                 GPIO_BUTTON_PIN, GPIO_LED_PIN)
+        log.info("GPIO polling thread started (button %d, LED %d)", GPIO_BUTTON_PIN, GPIO_LED_PIN)
 
     def _poll_button(self):
         last = GPIO.input(GPIO_BUTTON_PIN)
