@@ -1,170 +1,131 @@
-# debug.py
-
 #!/usr/bin/env python3
 """
-Debug endpoints for testing tones, LED, button, and mic recording.
+Simplified Debug endpoints: tone, LED, button, mic start/stop.
 """
 
-import os
-import time
-import threading
-import logging
-import wave
-
-from flask import Blueprint, current_app, jsonify, request
+import os, time, threading, logging, wave
+from flask import Blueprint, jsonify
 from pydub.generators import Sine
-
 import pyaudio
-import numpy as np
 
 from config import (
-    GPIO_LED_PIN,
-    GPIO_BUTTON_PIN,
-    BUTTON_ACTIVE_HIGH,
-    MIC_DEVICE_INDEX,
-    MIC_SAMPLE_RATE,
-    MIC_CHANNELS,
-    MIC_CHUNK,
+    GPIO_LED_PIN, GPIO_BUTTON_PIN, BUTTON_ACTIVE_HIGH,
+    MIC_DEVICE_INDEX, MIC_SAMPLE_RATE, MIC_CHANNELS, MIC_CHUNK
 )
+from audio_manager import play_audio
 
-# Try to import GPIO
 try:
     import RPi.GPIO as GPIO
-    HAS_GPIO = True
-except ImportError:
-    HAS_GPIO = False
-
-log = logging.getLogger("debug")
-bp = Blueprint("debug", __name__, url_prefix="/api/debug")
-
-# directory for saving generated/recorded audio (reuse main audio folder)
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-AUDIO_DIR = os.path.join(BASE_DIR, "audio_files")
-os.makedirs(AUDIO_DIR, exist_ok=True)
-
-# initialize GPIO if available
-if HAS_GPIO:
     GPIO.setmode(GPIO.BCM)
     GPIO.setup(GPIO_LED_PIN, GPIO.OUT, initial=GPIO.LOW)
     GPIO.setup(GPIO_BUTTON_PIN, GPIO.IN)
+    HAS_GPIO = True
+except ImportError:
+    HAS_GPIO = False
+    logging.getLogger(__name__).warning("GPIO not available – debug button/LED disabled")
+
+bp = Blueprint("debug", __name__, url_prefix="/api/debug")
+
+# Globals for mic recording
+_recording = False
+_frames = []
+_pa = None
+_stream = None
+
+def _mic_worker():
+    global _recording, _stream, _frames
+    while _recording:
+        try:
+            data = _stream.read(MIC_CHUNK, exception_on_overflow=False)
+            _frames.append(data)
+        except Exception:
+            break
 
 @bp.route("/tone", methods=["POST"])
 def tone():
     """
-    Generate a sine tone and play it.
-    JSON body params:
-      - frequency (Hz, default=440)
-      - duration (ms, default=1000)
-    Returns {"audio_url": "..."} for playback.
+    Play a sine tone.
+    Query args: frequency (Hz), duration (sec)
     """
-    data = request.get_json() or {}
-    freq = float(data.get("frequency", 440))
-    duration = int(data.get("duration", 1000))
-    filename = f"debug_tone_{int(freq)}Hz_{duration}ms.wav"
-    filepath = os.path.join(AUDIO_DIR, filename)
-
-    # generate tone
-    seg = Sine(freq).to_audio_segment(duration=duration).set_frame_rate(44100).set_channels(1).set_sample_width(2)
-    seg.export(filepath, format="wav")
-
-    # play it immediately
-    from audio_manager import play_audio
-    play_audio(filepath)
-
-    return jsonify({"audio_url": f"/audio_files/{filename}"})
+    from flask import request
+    freq = float(request.args.get("frequency", 440))
+    dur = float(request.args.get("duration", 1))
+    fname = f"debug_tone_{int(freq)}Hz_{int(dur)}s.wav"
+    path = os.path.join(os.getcwd(), "audio_files", fname)
+    seg = Sine(freq).to_audio_segment(duration=int(dur*1000))
+    seg.export(path, format="wav")
+    play_audio(path)
+    return jsonify({"audio_url": f"/audio_files/{fname}"})
 
 @bp.route("/led", methods=["POST"])
 def led():
-    """
-    Blink the LED.
-    JSON body params:
-      - times (int, default=3)
-      - interval (sec, default=0.5)
-    """
+    """Blink the LED 3× at 0.5s intervals."""
     if not HAS_GPIO:
         return jsonify({"error": "GPIO not available"}), 400
 
-    data = request.get_json() or {}
-    times = int(data.get("times", 3))
-    interval = float(data.get("interval", 0.5))
-
-    def blink():
-        for _ in range(times):
+    def _blink():
+        for _ in range(3):
             GPIO.output(GPIO_LED_PIN, GPIO.HIGH if BUTTON_ACTIVE_HIGH else GPIO.LOW)
-            time.sleep(interval)
+            time.sleep(0.5)
             GPIO.output(GPIO_LED_PIN, GPIO.LOW if BUTTON_ACTIVE_HIGH else GPIO.HIGH)
-            time.sleep(interval)
+            time.sleep(0.5)
 
-    threading.Thread(target=blink, daemon=True).start()
-    return jsonify({"message": f"Blinking LED {times} times at {interval}s interval"})
+    threading.Thread(target=_blink, daemon=True).start()
+    return jsonify({"status": "LED blink started"})
 
 @bp.route("/button", methods=["GET"])
 def button():
-    """
-    Read the current button state.
-    Returns {"pressed": true/false}.
-    """
+    """Read current button state."""
     if not HAS_GPIO:
         return jsonify({"error": "GPIO not available"}), 400
-
     raw = GPIO.input(GPIO_BUTTON_PIN)
     pressed = bool(raw) if BUTTON_ACTIVE_HIGH else not bool(raw)
     return jsonify({"pressed": pressed})
 
-@bp.route("/mic", methods=["POST"])
-def mic():
-    """
-    Record from the USB mic.
-    JSON body params:
-      - duration (sec, default=3)
-    Returns {"audio_url": "..."} for playback.
-    """
-    data = request.get_json() or {}
-    duration = float(data.get("duration", 3))
-    ts = int(time.time())
-    filename = f"debug_mic_{ts}.wav"
-    filepath = os.path.join(AUDIO_DIR, filename)
+@bp.route("/mic/start", methods=["POST"])
+def mic_start():
+    """Begin recording until /mic/stop is called."""
+    global _recording, _frames, _pa, _stream
+    if _recording:
+        return jsonify({"error": "Already recording"}), 400
 
-    pa = pyaudio.PyAudio()
-    fmt = pyaudio.paInt16
-    channels = MIC_CHANNELS
-    rate = (
-        MIC_SAMPLE_RATE
-        if MIC_SAMPLE_RATE and MIC_SAMPLE_RATE != 0
-        else int(pa.get_device_info_by_index(MIC_DEVICE_INDEX)["defaultSampleRate"])
-    )
-    chunk = MIC_CHUNK
-
-    stream = pa.open(
-        format=fmt,
-        channels=channels,
+    _pa = pyaudio.PyAudio()
+    rate = MIC_SAMPLE_RATE or int(_pa.get_device_info_by_index(MIC_DEVICE_INDEX)["defaultSampleRate"])
+    _stream = _pa.open(
+        format=pyaudio.paInt16,
+        channels=MIC_CHANNELS,
         rate=rate,
         input=True,
-        frames_per_buffer=chunk,
+        frames_per_buffer=MIC_CHUNK,
         input_device_index=MIC_DEVICE_INDEX,
     )
-    frames = []
-    total_chunks = int(rate / chunk * duration)
-    for _ in range(total_chunks):
-        try:
-            data_chunk = stream.read(chunk, exception_on_overflow=False)
-        except Exception:
-            break
-        frames.append(data_chunk)
+    _frames = []
+    _recording = True
+    threading.Thread(target=_mic_worker, daemon=True).start()
+    return jsonify({"status": "recording started"})
 
-    stream.stop_stream()
-    stream.close()
-    pa.terminate()
+@bp.route("/mic/stop", methods=["POST"])
+def mic_stop():
+    """Stop recording and play back."""
+    global _recording, _frames, _pa, _stream
+    if not _recording:
+        return jsonify({"error": "Not recording"}), 400
 
-    wf = wave.open(filepath, "wb")
-    wf.setnchannels(channels)
-    wf.setsampwidth(pa.get_sample_size(fmt))
+    _recording = False
+    time.sleep(0.1)  # let thread finish
+    _stream.stop_stream()
+    _stream.close()
+    _pa.terminate()
+
+    ts = int(time.time())
+    fname = f"debug_mic_{ts}.wav"
+    path = os.path.join(os.getcwd(), "audio_files", fname)
+    wf = wave.open(path, "wb")
+    wf.setnchannels(MIC_CHANNELS)
+    wf.setsampwidth(_pa.get_sample_size(pyaudio.paInt16))
     wf.setframerate(rate)
-    wf.writeframes(b"".join(frames))
+    wf.writeframes(b"".join(_frames))
     wf.close()
 
-    # play it immediately
-    from audio_manager import play_audio
-    play_audio(filepath)
-
-    return jsonify({"audio_url": f"/audio_files/{filename}"})
+    play_audio(path)
+    return jsonify({"audio_url": f"/audio_files/{fname}"})

@@ -187,8 +187,6 @@ class PDFManager:
 ================================================
 File: /config.py
 ================================================
-# config.py
-
 #!/usr/bin/env python3
 """
 Centralised STR hardware/audio/GPIO settings (plus vector store and AI model config).
@@ -212,12 +210,11 @@ def find_device_index(p, device_name_part, is_input=True):
 try:
     import pyaudio
     p = pyaudio.PyAudio()
-    DEFAULT_MIC_INDEX = find_device_index(p, 'usb', is_input=True) or 1 # Default guess
-    # Try finding common DAC names like 'pcm5102' or 'audioinjector' or just use default output
+    DEFAULT_MIC_INDEX = find_device_index(p, 'usb', is_input=True) or 1
     DEFAULT_DAC_INDEX = find_device_index(p, 'pcm5102', is_input=False) or \
                         find_device_index(p, 'audioinjector', is_input=False) or \
                         find_device_index(p, 'speaker', is_input=False) or \
-                        p.get_default_output_device_info()['index'] or 1 # Default guess
+                        p.get_default_output_device_info()['index'] or 1
     p.terminate()
 except Exception as e:
     logging.warning(f"PyAudio check failed during config load: {e}. Using fallback defaults.")
@@ -229,8 +226,7 @@ except Exception as e:
 # Audio (USB mic)
 # ------------------------------------------------------------------#
 MIC_DEVICE_INDEX: int = int(os.getenv("MIC_DEVICE_INDEX", str(DEFAULT_MIC_INDEX)))
-# Let PyAudio determine optimal sample rate if not set (0)
-MIC_SAMPLE_RATE: int  = int(os.getenv("MIC_SAMPLE_RATE", "0"))
+MIC_SAMPLE_RATE: int  = int(os.getenv("MIC_SAMPLE_RATE", "0"))  # 48 kHz mic
 MIC_CHANNELS: int     = int(os.getenv("MIC_CHANNELS",    "1"))
 MIC_CHUNK: int        = int(os.getenv("MIC_CHUNK",      "1024"))
 MIC_NORMALISE: bool   = os.getenv("MIC_NORMALISE",      "1") == "1"
@@ -238,11 +234,10 @@ MIC_NORMALISE: bool   = os.getenv("MIC_NORMALISE",      "1") == "1"
 # ------------------------------------------------------------------#
 # Playback (PCM5102 DAC via PyAudio)
 # ------------------------------------------------------------------#
-# Replace DAC_APLAY_DEVICE with DAC_PYAUDIO_INDEX
-# IMPORTANT: You might need to adjust this index based on your system.
-# Run `python -m sounddevice` or a similar tool to list audio devices and find the correct index for your DAC.
 DAC_PYAUDIO_INDEX: int = int(os.getenv("DAC_PYAUDIO_INDEX", str(DEFAULT_DAC_INDEX)))
-PLAYBACK_CHUNK: int = 1024 # Chunk size for playback
+PLAYBACK_CHUNK: int    = 1024  # chunk size
+# Force all playback to this DAC rate so things never sound slow
+OUTPUT_SAMPLE_RATE: int = int(os.getenv("OUTPUT_SAMPLE_RATE", "48000"))
 
 
 # ------------------------------------------------------------------#
@@ -250,25 +245,20 @@ PLAYBACK_CHUNK: int = 1024 # Chunk size for playback
 # ------------------------------------------------------------------#
 GPIO_BUTTON_PIN: int  = int(os.getenv("GPIO_BUTTON_PIN", "17"))
 GPIO_LED_PIN:   int   = int(os.getenv("GPIO_LED_PIN",    "27"))
-# Set to True if button connects GPIO to 3.3V when pressed, False if it connects to GND.
-# Depends on your wiring (pull-up vs pull-down resistor).
 BUTTON_ACTIVE_HIGH: bool = os.getenv("BUTTON_ACTIVE_HIGH", "False").lower() in ("true", "1", "yes")
-# Enable GPIO functionality (set to False to disable even if RPi.GPIO is installed)
-ENABLE_GPIO: bool = os.getenv("ENABLE_GPIO", "True").lower() in ("true", "1", "yes")
+ENABLE_GPIO: bool       = os.getenv("ENABLE_GPIO", "True").lower() in ("true", "1", "yes")
+
 
 # ------------------------------------------------------------------#
 # OpenAI Vector Store for File Search
-# Set VECTOR_STORE_ID to your existing vector store in ENV
 # ------------------------------------------------------------------#
 VECTOR_STORE_ID: str = os.getenv("VECTOR_STORE_ID", "")
 if not VECTOR_STORE_ID:
-    # Allow running without vector store for basic functionality
     logging.warning("VECTOR_STORE_ID not set in environment. PDF features will fail.")
-    # raise RuntimeError("Please set VECTOR_STORE_ID in your environment") # Optional: make it mandatory
+
 
 # ------------------------------------------------------------------#
 # OpenAI Model Configuration
-# You can override these via environment variables.
 # ------------------------------------------------------------------#
 OPENAI_MODEL_FILE_QA: str       = os.getenv("OPENAI_MODEL_FILE_QA",       "gpt-4.1-mini")
 OPENAI_MODEL_AGENT: str         = os.getenv("OPENAI_MODEL_AGENT",         "gpt-4.1-mini")
@@ -280,6 +270,7 @@ OPENAI_MODEL_TRANSCRIPTION: str = os.getenv("OPENAI_MODEL_TRANSCRIPTION", "whisp
 logging.info(f"--- Configuration ---")
 logging.info(f"Mic Device Index: {MIC_DEVICE_INDEX}")
 logging.info(f"DAC Device Index: {DAC_PYAUDIO_INDEX}")
+logging.info(f"Output Sample Rate: {OUTPUT_SAMPLE_RATE} Hz")
 logging.info(f"GPIO Enabled: {ENABLE_GPIO}")
 if ENABLE_GPIO:
     logging.info(f"  Button Pin: {GPIO_BUTTON_PIN} (Active High: {BUTTON_ACTIVE_HIGH})")
@@ -287,25 +278,6 @@ if ENABLE_GPIO:
 logging.info(f"Vector Store ID: {'Set' if VECTOR_STORE_ID else 'Not Set'}")
 logging.info(f"--------------------")
 
-# Add a check for finding device indices if run directly
-if __name__ == "__main__":
-    print("--- Audio Device List ---")
-    try:
-        import pyaudio
-        p = pyaudio.PyAudio()
-        print(f"Default Input Index: {p.get_default_input_device_info()['index']}")
-        print(f"Default Output Index: {p.get_default_output_device_info()['index']}")
-        print("-" * 25)
-        for i in range(p.get_device_count()):
-            info = p.get_device_info_by_index(i)
-            print(f"Index {i}: {info['name']} (In: {info['maxInputChannels']}, Out: {info['maxOutputChannels']})")
-        p.terminate()
-        print("-" * 25)
-        print(f"Configured MIC Index: {MIC_DEVICE_INDEX}")
-        print(f"Configured DAC Index: {DAC_PYAUDIO_INDEX}")
-    except Exception as e:
-        print(f"Could not list audio devices: {e}")
-    print("-------------------------")
 
 ================================================
 File: /realtime.py
@@ -315,26 +287,14 @@ File: /realtime.py
 Realtime speech-to-speech for STR.
 
 • Records from USB mic at 48 kHz, downsamples to 24 kHz for OpenAI streaming.
-• Streams audio or typed text to OpenAI Realtime API and plays back at 24 kHz
-  via the PCM5102 (stereo) DAC.
-• Toggles recording via web buttons or physical push‑button (GPIO17),
-  lights LED (GPIO27) while recording.
-• Uses external 10 kΩ pull‑down resistor on the button when available.
+• Streams audio or typed text to OpenAI Realtime API and plays back at OUTPUT_SAMPLE_RATE Hz stereo.
+• Toggles recording via web buttons or physical push‑button (GPIO17), lights LED (GPIO27) while recording.
 """
 
 from __future__ import annotations
-import os
-import ssl
-import json
-import base64
-import asyncio
-import threading
-import logging
-import pyaudio
-import numpy as np
-import websockets
+import os, ssl, json, base64, asyncio, threading, logging
+import pyaudio, numpy as np, websockets
 
-# GPIO import (optional)
 try:
     import RPi.GPIO as GPIO
     HAS_GPIO = True
@@ -342,16 +302,10 @@ except ImportError:
     HAS_GPIO = False
 
 from config import (
-    MIC_DEVICE_INDEX,
-    MIC_SAMPLE_RATE,
-    MIC_CHANNELS,
-    MIC_CHUNK,
-    MIC_NORMALISE,
-    GPIO_BUTTON_PIN,
-    GPIO_LED_PIN,
-    BUTTON_ACTIVE_HIGH,
-    OPENAI_MODEL_REALTIME,
-    OPENAI_MODEL_TRANSCRIPTION,
+    MIC_DEVICE_INDEX, MIC_SAMPLE_RATE, MIC_CHANNELS, MIC_CHUNK, MIC_NORMALISE,
+    GPIO_BUTTON_PIN, GPIO_LED_PIN, BUTTON_ACTIVE_HIGH,
+    OPENAI_MODEL_REALTIME, OPENAI_MODEL_TRANSCRIPTION,
+    OUTPUT_SAMPLE_RATE, DAC_PYAUDIO_INDEX, PLAYBACK_CHUNK
 )
 
 logging.basicConfig(
@@ -364,14 +318,11 @@ API_SAMPLE_RATE = 24000  # OpenAI Realtime expects 24 kHz
 
 INSTRUCTIONS = (
     "You are a professional radio broadcaster. Provide a natural, "
-    "broadcast-style answer. Answer in Spanish from Spain. Use European "
-    "format for all dates and units. Do not say anything in your first "
-    "message except 'Started'. Answer briefly."
+    "broadcast-style answer in Spanish from Spain. Use European format."
 )
 
-class AudioHandler:
-    """Handle mic capture at MIC_SAMPLE_RATE and playback at 24 kHz stereo."""
 
+class AudioHandler:
     def __init__(self, device_index: int):
         self.device_index = device_index
         self.channels = MIC_CHANNELS
@@ -406,24 +357,17 @@ class AudioHandler:
     def read_chunk(self) -> bytes | None:
         if not self.recording or not self.stream:
             return None
-        try:
-            raw = self.stream.read(self.chunk, exception_on_overflow=False)
-        except Exception as e:
-            log.error("Mic read error: %s", e)
-            return None
-
+        raw = self.stream.read(self.chunk, exception_on_overflow=False)
         audio = np.frombuffer(raw, dtype=np.int16)
         if MIC_NORMALISE:
             peak = np.max(np.abs(audio)) or 1
             gain = int(0.9 * 32767 / peak)
             if gain > 1:
                 audio = np.clip(audio * gain, -32768, 32767).astype(np.int16)
-
         if self.input_rate != API_SAMPLE_RATE:
             factor = self.input_rate // API_SAMPLE_RATE
             if factor > 1:
                 audio = audio[::factor]
-
         return audio.tobytes()
 
     def stop_input(self):
@@ -435,22 +379,50 @@ class AudioHandler:
         log.info("🎙️ Mic OFF")
 
     def play(self, data: bytes):
-        """Play API response audio at 24 kHz stereo via PCM5102."""
-
+        """Play API audio: resample from 24 kHz mono to OUTPUT_SAMPLE_RATE stereo, with fallback."""
         def _playback():
             try:
-                # PCM5102 is stereo; duplicate mono into both channels
                 samples = np.frombuffer(data, dtype=np.int16)
+                in_rate = API_SAMPLE_RATE
+                out_rate = OUTPUT_SAMPLE_RATE
+
+                # resample if needed
+                if in_rate != out_rate:
+                    idx_orig = np.arange(len(samples))
+                    target_len = int(len(samples) * out_rate / in_rate)
+                    idx_new = np.linspace(0, len(samples) - 1, target_len)
+                    samples = np.interp(idx_new, idx_orig, samples).astype(np.int16)
+
                 stereo = np.repeat(samples, 2)
-                out = self.p.open(
-                    format=self.fmt,
-                    channels=1,
-                    rate=API_SAMPLE_RATE,
-                    output=True,
-                )
-                out.write(stereo.tobytes())
-                out.stop_stream()
-                out.close()
+                p = self.p
+                fmt = self.fmt
+
+                # try DAC first
+                try:
+                    stream = p.open(
+                        format=fmt,
+                        channels=2,
+                        rate=out_rate,
+                        output=True,
+                        output_device_index=DAC_PYAUDIO_INDEX,
+                        frames_per_buffer=PLAYBACK_CHUNK,
+                    )
+                except Exception as e:
+                    log.warning(
+                        "Realtime play: cannot open device %s: %s (falling back)",
+                        DAC_PYAUDIO_INDEX, e
+                    )
+                    stream = p.open(
+                        format=fmt,
+                        channels=2,
+                        rate=out_rate,
+                        output=True,
+                        frames_per_buffer=PLAYBACK_CHUNK,
+                    )
+
+                stream.write(stereo.tobytes())
+                stream.stop_stream()
+                stream.close()
             except Exception as e:
                 log.error("Playback error: %s", e)
 
@@ -459,6 +431,10 @@ class AudioHandler:
     def close(self):
         self.stop_input()
         self.p.terminate()
+
+
+# … rest of RealtimeClient unchanged …
+
 
 
 class RealtimeClient:
@@ -603,8 +579,7 @@ class RealtimeClient:
         GPIO.setup(GPIO_LED_PIN, GPIO.OUT, initial=GPIO.LOW)
         GPIO.setup(GPIO_BUTTON_PIN, GPIO.IN)
         threading.Thread(target=self._poll_button, daemon=True).start()
-        log.info("GPIO polling thread started (button %d, LED %d)",
-                 GPIO_BUTTON_PIN, GPIO_LED_PIN)
+        log.info("GPIO polling thread started (button %d, LED %d)", GPIO_BUTTON_PIN, GPIO_LED_PIN)
 
     def _poll_button(self):
         last = GPIO.input(GPIO_BUTTON_PIN)
@@ -670,128 +645,91 @@ File: /audio_manager.py
 ================================================
 #!/usr/bin/env python3
 """
-Save, convert and play audio – now using PyAudio for playback via DAC index.
+Save, convert and play audio – now resampling and with device fallback.
 """
 
 import os
-import sys
 import logging
-import wave
-import pyaudio # Added
 from pydub import AudioSegment
+import pyaudio
 
-# Import config for device index and chunk size
-from config import DAC_PYAUDIO_INDEX, PLAYBACK_CHUNK
+from config import DAC_PYAUDIO_INDEX, PLAYBACK_CHUNK, OUTPUT_SAMPLE_RATE
 
 log = logging.getLogger(__name__)
 
 
-# ------------------------------------------------------------------#
-#  Helpers                                                          #
-# ------------------------------------------------------------------#
 def save_stream_to_file(stream, filepath):
     """Save streaming data to a file."""
-    try:
-        with open(filepath, "wb") as f:
-            for chunk in stream:
-                f.write(chunk)
-        log.info("File saved: %s", filepath)
-    except Exception as e:
-        log.error(f"Error saving stream to {filepath}: {e}")
-        raise
+    with open(filepath, "wb") as f:
+        for chunk in stream:
+            f.write(chunk)
+    log.info("File saved: %s", filepath)
+
 
 def convert_mp3_to_wav(mp3_filepath, wav_filepath):
-    """Convert MP3 → WAV, 44.1 kHz stereo 16‑bit."""
-    try:
-        audio = AudioSegment.from_mp3(mp3_filepath)
-        # Ensure consistent format for playback
-        audio = audio.set_frame_rate(44100).set_sample_width(2).set_channels(2)
-        audio.export(wav_filepath, format="wav")
-        log.info("Converted %s → %s (44.1kHz, 16-bit, Stereo)", mp3_filepath, wav_filepath)
-    except Exception as e:
-        log.error(f"Error converting {mp3_filepath} to {wav_filepath}: {e}")
-        raise
+    """Convert MP3 → WAV, then resample to OUTPUT_SAMPLE_RATE stereo 16‑bit."""
+    audio = AudioSegment.from_mp3(mp3_filepath)
+    audio = audio.set_frame_rate(OUTPUT_SAMPLE_RATE).set_sample_width(2).set_channels(2)
+    audio.export(wav_filepath, format="wav")
+    log.info("Converted %s → %s (%d Hz, 16‑bit, Stereo)",
+             mp3_filepath, wav_filepath, OUTPUT_SAMPLE_RATE)
+
 
 def play_audio(filepath):
-    """Play a WAV audio file using PyAudio."""
+    """Play any WAV audio file, resampled to OUTPUT_SAMPLE_RATE, with device‐fallback."""
     if not os.path.exists(filepath):
-        log.error(f"Playback error: File not found - {filepath}")
+        log.error("Playback error: File not found - %s", filepath)
         return
 
-    wf = None
-    stream = None
-    p = None
+    # Load & resample
+    audio = AudioSegment.from_wav(filepath)
+    audio = audio.set_frame_rate(OUTPUT_SAMPLE_RATE)
+    raw_data = audio.raw_data
+    channels = audio.channels
+    sample_width = audio.sample_width
+    rate = OUTPUT_SAMPLE_RATE
+
+    p = pyaudio.PyAudio()
+    fmt = p.get_format_from_width(sample_width)
+
+    log.info(
+        "Playing: %s (%d Hz, %d channels, %d‑byte samples) on device %s",
+        filepath, rate, channels, sample_width, DAC_PYAUDIO_INDEX
+    )
+    # try your DAC first
     try:
-        wf = wave.open(filepath, 'rb')
-        p = pyaudio.PyAudio()
-
-        sample_width = wf.getsampwidth()
-        channels = wf.getnchannels()
-        rate = wf.getframerate()
-        audio_format = p.get_format_from_width(sample_width)
-
-        log.info(f"Playing: {filepath} (Rate: {rate}, Ch: {channels}, Width: {sample_width}, Format: {audio_format})")
-        log.info(f"Using output device index: {DAC_PYAUDIO_INDEX}")
-
-        stream = p.open(format=audio_format,
-                        channels=channels,
-                        rate=rate,
-                        output=True,
-                        output_device_index=DAC_PYAUDIO_INDEX,
-                        frames_per_buffer=PLAYBACK_CHUNK)
-
-        data = wf.readframes(PLAYBACK_CHUNK)
-        while data:
-            stream.write(data)
-            data = wf.readframes(PLAYBACK_CHUNK)
-
-        # Wait for stream to finish
-        stream.stop_stream()
-
-        log.info(f"Finished playing: {filepath}")
-
-    except FileNotFoundError:
-        log.error(f"Playback failed: File not found at {filepath}")
+        stream = p.open(
+            format=fmt,
+            channels=channels,
+            rate=rate,
+            output=True,
+            output_device_index=DAC_PYAUDIO_INDEX,
+            frames_per_buffer=PLAYBACK_CHUNK,
+        )
     except Exception as e:
-        log.exception(f"Error during PyAudio playback of {filepath}: {e}") # Use exception for stack trace
-    finally:
-        # Ensure resources are always released
-        if stream is not None:
-            stream.close()
-            log.debug("PyAudio stream closed.")
-        if wf is not None:
-            wf.close()
-            log.debug(f"Wave file closed: {filepath}")
-        if p is not None:
-            p.terminate()
-            log.debug("PyAudio instance terminated.")
+        log.warning(
+            "Failed to open output device %s: %s. Falling back to default output device.",
+            DAC_PYAUDIO_INDEX, e
+        )
+        stream = p.open(
+            format=fmt,
+            channels=channels,
+            rate=rate,
+            output=True,
+            frames_per_buffer=PLAYBACK_CHUNK,
+        )
 
-# Example usage if run directly (for testing)
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    # Create a dummy test file (e.g., a short sine wave) if needed
-    test_wav = "test_playback.wav"
-    if not os.path.exists(test_wav):
-        try:
-            from pydub.generators import Sine
-            log.info("Generating a test sine wave...")
-            sine_wave = Sine(440).to_audio_segment(duration=2000) # 2 seconds of 440 Hz
-            # Ensure it matches expected playback format if needed, though convert_mp3_to_wav does this
-            sine_wave = sine_wave.set_frame_rate(44100).set_sample_width(2).set_channels(2)
-            sine_wave.export(test_wav, format="wav")
-            log.info(f"Test file created: {test_wav}")
-        except Exception as e:
-            log.error(f"Could not create test WAV file: {e}")
-            sys.exit(1)
+    # Write in chunks
+    bytes_per_frame = sample_width * channels
+    chunk_bytes = PLAYBACK_CHUNK * bytes_per_frame
+    for start in range(0, len(raw_data), chunk_bytes):
+        stream.write(raw_data[start:start + chunk_bytes])
 
-    if os.path.exists(test_wav):
-        log.info(f"Attempting to play test file: {test_wav}")
-        play_audio(test_wav)
-        log.info("Test playback finished.")
-        # Optional: clean up test file
-        # os.remove(test_wav)
-    else:
-        log.error("Test file does not exist, cannot perform playback test.")
+    stream.stop_stream()
+    stream.close()
+    p.terminate()
+    log.info("Finished playing: %s", filepath)
+
 
 ================================================
 File: /agents.py
@@ -946,176 +884,137 @@ class GPIOController:
 ================================================
 File: /debug.py
 ================================================
-# debug.py
-
 #!/usr/bin/env python3
 """
-Debug endpoints for testing tones, LED, button, and mic recording.
+Simplified Debug endpoints: tone, LED, button, mic start/stop.
 """
 
-import os
-import time
-import threading
-import logging
-import wave
-
-from flask import Blueprint, current_app, jsonify, request
+import os, time, threading, logging, wave
+from flask import Blueprint, jsonify
 from pydub.generators import Sine
-
 import pyaudio
-import numpy as np
 
 from config import (
-    GPIO_LED_PIN,
-    GPIO_BUTTON_PIN,
-    BUTTON_ACTIVE_HIGH,
-    MIC_DEVICE_INDEX,
-    MIC_SAMPLE_RATE,
-    MIC_CHANNELS,
-    MIC_CHUNK,
+    GPIO_LED_PIN, GPIO_BUTTON_PIN, BUTTON_ACTIVE_HIGH,
+    MIC_DEVICE_INDEX, MIC_SAMPLE_RATE, MIC_CHANNELS, MIC_CHUNK
 )
+from audio_manager import play_audio
 
-# Try to import GPIO
 try:
     import RPi.GPIO as GPIO
-    HAS_GPIO = True
-except ImportError:
-    HAS_GPIO = False
-
-log = logging.getLogger("debug")
-bp = Blueprint("debug", __name__, url_prefix="/api/debug")
-
-# directory for saving generated/recorded audio (reuse main audio folder)
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-AUDIO_DIR = os.path.join(BASE_DIR, "audio_files")
-os.makedirs(AUDIO_DIR, exist_ok=True)
-
-# initialize GPIO if available
-if HAS_GPIO:
     GPIO.setmode(GPIO.BCM)
     GPIO.setup(GPIO_LED_PIN, GPIO.OUT, initial=GPIO.LOW)
     GPIO.setup(GPIO_BUTTON_PIN, GPIO.IN)
+    HAS_GPIO = True
+except ImportError:
+    HAS_GPIO = False
+    logging.getLogger(__name__).warning("GPIO not available – debug button/LED disabled")
+
+bp = Blueprint("debug", __name__, url_prefix="/api/debug")
+
+# Globals for mic recording
+_recording = False
+_frames = []
+_pa = None
+_stream = None
+
+def _mic_worker():
+    global _recording, _stream, _frames
+    while _recording:
+        try:
+            data = _stream.read(MIC_CHUNK, exception_on_overflow=False)
+            _frames.append(data)
+        except Exception:
+            break
 
 @bp.route("/tone", methods=["POST"])
 def tone():
     """
-    Generate a sine tone and play it.
-    JSON body params:
-      - frequency (Hz, default=440)
-      - duration (ms, default=1000)
-    Returns {"audio_url": "..."} for playback.
+    Play a sine tone.
+    Query args: frequency (Hz), duration (sec)
     """
-    data = request.get_json() or {}
-    freq = float(data.get("frequency", 440))
-    duration = int(data.get("duration", 1000))
-    filename = f"debug_tone_{int(freq)}Hz_{duration}ms.wav"
-    filepath = os.path.join(AUDIO_DIR, filename)
-
-    # generate tone
-    seg = Sine(freq).to_audio_segment(duration=duration).set_frame_rate(44100).set_channels(1).set_sample_width(2)
-    seg.export(filepath, format="wav")
-
-    # play it immediately
-    from audio_manager import play_audio
-    play_audio(filepath)
-
-    return jsonify({"audio_url": f"/audio_files/{filename}"})
+    from flask import request
+    freq = float(request.args.get("frequency", 440))
+    dur = float(request.args.get("duration", 1))
+    fname = f"debug_tone_{int(freq)}Hz_{int(dur)}s.wav"
+    path = os.path.join(os.getcwd(), "audio_files", fname)
+    seg = Sine(freq).to_audio_segment(duration=int(dur*1000))
+    seg.export(path, format="wav")
+    play_audio(path)
+    return jsonify({"audio_url": f"/audio_files/{fname}"})
 
 @bp.route("/led", methods=["POST"])
 def led():
-    """
-    Blink the LED.
-    JSON body params:
-      - times (int, default=3)
-      - interval (sec, default=0.5)
-    """
+    """Blink the LED 3× at 0.5s intervals."""
     if not HAS_GPIO:
         return jsonify({"error": "GPIO not available"}), 400
 
-    data = request.get_json() or {}
-    times = int(data.get("times", 3))
-    interval = float(data.get("interval", 0.5))
-
-    def blink():
-        for _ in range(times):
+    def _blink():
+        for _ in range(3):
             GPIO.output(GPIO_LED_PIN, GPIO.HIGH if BUTTON_ACTIVE_HIGH else GPIO.LOW)
-            time.sleep(interval)
+            time.sleep(0.5)
             GPIO.output(GPIO_LED_PIN, GPIO.LOW if BUTTON_ACTIVE_HIGH else GPIO.HIGH)
-            time.sleep(interval)
+            time.sleep(0.5)
 
-    threading.Thread(target=blink, daemon=True).start()
-    return jsonify({"message": f"Blinking LED {times} times at {interval}s interval"})
+    threading.Thread(target=_blink, daemon=True).start()
+    return jsonify({"status": "LED blink started"})
 
 @bp.route("/button", methods=["GET"])
 def button():
-    """
-    Read the current button state.
-    Returns {"pressed": true/false}.
-    """
+    """Read current button state."""
     if not HAS_GPIO:
         return jsonify({"error": "GPIO not available"}), 400
-
     raw = GPIO.input(GPIO_BUTTON_PIN)
     pressed = bool(raw) if BUTTON_ACTIVE_HIGH else not bool(raw)
     return jsonify({"pressed": pressed})
 
-@bp.route("/mic", methods=["POST"])
-def mic():
-    """
-    Record from the USB mic.
-    JSON body params:
-      - duration (sec, default=3)
-    Returns {"audio_url": "..."} for playback.
-    """
-    data = request.get_json() or {}
-    duration = float(data.get("duration", 3))
-    ts = int(time.time())
-    filename = f"debug_mic_{ts}.wav"
-    filepath = os.path.join(AUDIO_DIR, filename)
+@bp.route("/mic/start", methods=["POST"])
+def mic_start():
+    """Begin recording until /mic/stop is called."""
+    global _recording, _frames, _pa, _stream
+    if _recording:
+        return jsonify({"error": "Already recording"}), 400
 
-    pa = pyaudio.PyAudio()
-    fmt = pyaudio.paInt16
-    channels = MIC_CHANNELS
-    rate = (
-        MIC_SAMPLE_RATE
-        if MIC_SAMPLE_RATE and MIC_SAMPLE_RATE != 0
-        else int(pa.get_device_info_by_index(MIC_DEVICE_INDEX)["defaultSampleRate"])
-    )
-    chunk = MIC_CHUNK
-
-    stream = pa.open(
-        format=fmt,
-        channels=channels,
+    _pa = pyaudio.PyAudio()
+    rate = MIC_SAMPLE_RATE or int(_pa.get_device_info_by_index(MIC_DEVICE_INDEX)["defaultSampleRate"])
+    _stream = _pa.open(
+        format=pyaudio.paInt16,
+        channels=MIC_CHANNELS,
         rate=rate,
         input=True,
-        frames_per_buffer=chunk,
+        frames_per_buffer=MIC_CHUNK,
         input_device_index=MIC_DEVICE_INDEX,
     )
-    frames = []
-    total_chunks = int(rate / chunk * duration)
-    for _ in range(total_chunks):
-        try:
-            data_chunk = stream.read(chunk, exception_on_overflow=False)
-        except Exception:
-            break
-        frames.append(data_chunk)
+    _frames = []
+    _recording = True
+    threading.Thread(target=_mic_worker, daemon=True).start()
+    return jsonify({"status": "recording started"})
 
-    stream.stop_stream()
-    stream.close()
-    pa.terminate()
+@bp.route("/mic/stop", methods=["POST"])
+def mic_stop():
+    """Stop recording and play back."""
+    global _recording, _frames, _pa, _stream
+    if not _recording:
+        return jsonify({"error": "Not recording"}), 400
 
-    wf = wave.open(filepath, "wb")
-    wf.setnchannels(channels)
-    wf.setsampwidth(pa.get_sample_size(fmt))
+    _recording = False
+    time.sleep(0.1)  # let thread finish
+    _stream.stop_stream()
+    _stream.close()
+    _pa.terminate()
+
+    ts = int(time.time())
+    fname = f"debug_mic_{ts}.wav"
+    path = os.path.join(os.getcwd(), "audio_files", fname)
+    wf = wave.open(path, "wb")
+    wf.setnchannels(MIC_CHANNELS)
+    wf.setsampwidth(_pa.get_sample_size(pyaudio.paInt16))
     wf.setframerate(rate)
-    wf.writeframes(b"".join(frames))
+    wf.writeframes(b"".join(_frames))
     wf.close()
 
-    # play it immediately
-    from audio_manager import play_audio
-    play_audio(filepath)
-
-    return jsonify({"audio_url": f"/audio_files/{filename}"})
+    play_audio(path)
+    return jsonify({"audio_url": f"/audio_files/{fname}"})
 
 
 ================================================
@@ -2029,54 +1928,55 @@ File: /templates/index.html
       };
 
       /* Debug */
-      const tonePlay = el("#tonePlay"),
-        ledTest = el("#ledTest"),
-        btnState = el("#btnState"),
-        micRec = el("#micRec"),
-        toneFreq = el("#toneFreq"),
-        toneDur = el("#toneDur"),
-        micDur = el("#micDur"),
-        btnResult = el("#btnResult"),
-        debugFeed = "#debugFeed";
-      tonePlay.onclick = async () => {
-        const f = +toneFreq.value,
-          d = +toneDur.value;
-        appendBubble(debugFeed, `Tono ${f}Hz ${d}ms…`, "user");
-        const res = await apiCall("/api/debug/tone", "POST", {
-          frequency: f,
-          duration: d,
-        });
-        if (res.success && res.audio_url)
-          appendBubble(debugFeed, "Reproducido", "bot", res.audio_url);
-        else appendBubble(debugFeed, `Error: ${res.error}`, "bot");
-      };
-      ledTest.onclick = async () => {
-        appendBubble(debugFeed, "Parpadeo LED…", "user");
-        const res = await apiCall("/api/debug/led", "POST", {});
-        if (res.success) appendBubble(debugFeed, res.message, "bot");
-        else appendBubble(debugFeed, `Error: ${res.error}`, "bot");
-      };
-      btnState.onclick = async () => {
-        appendBubble(debugFeed, "Leyendo botón…", "user");
-        const res = await apiCall("/api/debug/button", "GET");
-        if (res.success && typeof res.pressed === "boolean") {
-          const txt = res.pressed ? "Pulsado" : "Libre";
-          btnResult.textContent = txt;
-          appendBubble(debugFeed, `Estado: ${res.pressed}`, "bot");
-        } else appendBubble(debugFeed, `Error: ${res.error}`, "bot");
-      };
-      micRec.onclick = async () => {
-        const d = +micDur.value;
-        appendBubble(debugFeed, `Grabando ${d}s…`, "user");
-        const res = await apiCall("/api/debug/mic", "POST", { duration: d });
-        if (res.success && res.audio_url)
-          appendBubble(debugFeed, "Grabación lista", "bot", res.audio_url);
-        else appendBubble(debugFeed, `Error: ${res.error}`, "bot");
+      // … after your PDF code …
+      /* Debug Controls */
+      document.getElementById("tonePlay").onclick = async () => {
+        const f = +document.getElementById("toneFreq").value;
+        const d = +document.getElementById("toneDur").value;
+        const res = await apiCall(
+          `/api/debug/tone?frequency=${f}&duration=${d}`,
+          "POST"
+        );
+        if (res.audio_url) {
+          showToast("Tone played", "success");
+        }
       };
 
-      document.addEventListener("DOMContentLoaded", () => {
-        el(`#panel-tts`).classList.remove("hidden");
-      });
+      document.getElementById("ledTest").onclick = async () => {
+        await apiCall("/api/debug/led", "POST");
+        showToast("LED blink started", "success");
+      };
+
+      document.getElementById("btnState").onclick = async () => {
+        const res = await apiCall("/api/debug/button", "GET");
+        if (res.pressed !== undefined) {
+          document.getElementById("btnResult").textContent = res.pressed
+            ? "Pressed"
+            : "Released";
+        }
+      };
+
+      const micStartBtn = document.getElementById("micStart");
+      const micStopBtn = document.getElementById("micStop");
+      const micAudio = document.getElementById("micPlayback");
+
+      micStartBtn.onclick = async () => {
+        await apiCall("/api/debug/mic/start", "POST");
+        micStartBtn.disabled = true;
+        micStopBtn.disabled = false;
+        showToast("Recording…", "info");
+      };
+
+      micStopBtn.onclick = async () => {
+        const res = await apiCall("/api/debug/mic/stop", "POST");
+        if (res.audio_url) {
+          micAudio.src = res.audio_url;
+          micAudio.play();
+          showToast("Playback ready", "success");
+        }
+        micStartBtn.disabled = false;
+        micStopBtn.disabled = true;
+      };
     </script>
   </body>
 </html>

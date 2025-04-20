@@ -601,54 +601,55 @@
       };
 
       /* Debug */
-      const tonePlay = el("#tonePlay"),
-        ledTest = el("#ledTest"),
-        btnState = el("#btnState"),
-        micRec = el("#micRec"),
-        toneFreq = el("#toneFreq"),
-        toneDur = el("#toneDur"),
-        micDur = el("#micDur"),
-        btnResult = el("#btnResult"),
-        debugFeed = "#debugFeed";
-      tonePlay.onclick = async () => {
-        const f = +toneFreq.value,
-          d = +toneDur.value;
-        appendBubble(debugFeed, `Tono ${f}Hz ${d}ms…`, "user");
-        const res = await apiCall("/api/debug/tone", "POST", {
-          frequency: f,
-          duration: d,
-        });
-        if (res.success && res.audio_url)
-          appendBubble(debugFeed, "Reproducido", "bot", res.audio_url);
-        else appendBubble(debugFeed, `Error: ${res.error}`, "bot");
-      };
-      ledTest.onclick = async () => {
-        appendBubble(debugFeed, "Parpadeo LED…", "user");
-        const res = await apiCall("/api/debug/led", "POST", {});
-        if (res.success) appendBubble(debugFeed, res.message, "bot");
-        else appendBubble(debugFeed, `Error: ${res.error}`, "bot");
-      };
-      btnState.onclick = async () => {
-        appendBubble(debugFeed, "Leyendo botón…", "user");
-        const res = await apiCall("/api/debug/button", "GET");
-        if (res.success && typeof res.pressed === "boolean") {
-          const txt = res.pressed ? "Pulsado" : "Libre";
-          btnResult.textContent = txt;
-          appendBubble(debugFeed, `Estado: ${res.pressed}`, "bot");
-        } else appendBubble(debugFeed, `Error: ${res.error}`, "bot");
-      };
-      micRec.onclick = async () => {
-        const d = +micDur.value;
-        appendBubble(debugFeed, `Grabando ${d}s…`, "user");
-        const res = await apiCall("/api/debug/mic", "POST", { duration: d });
-        if (res.success && res.audio_url)
-          appendBubble(debugFeed, "Grabación lista", "bot", res.audio_url);
-        else appendBubble(debugFeed, `Error: ${res.error}`, "bot");
+      // … after your PDF code …
+      /* Debug Controls */
+      document.getElementById("tonePlay").onclick = async () => {
+        const f = +document.getElementById("toneFreq").value;
+        const d = +document.getElementById("toneDur").value;
+        const res = await apiCall(
+          `/api/debug/tone?frequency=${f}&duration=${d}`,
+          "POST"
+        );
+        if (res.audio_url) {
+          showToast("Tone played", "success");
+        }
       };
 
-      document.addEventListener("DOMContentLoaded", () => {
-        el(`#panel-tts`).classList.remove("hidden");
-      });
+      document.getElementById("ledTest").onclick = async () => {
+        await apiCall("/api/debug/led", "POST");
+        showToast("LED blink started", "success");
+      };
+
+      document.getElementById("btnState").onclick = async () => {
+        const res = await apiCall("/api/debug/button", "GET");
+        if (res.pressed !== undefined) {
+          document.getElementById("btnResult").textContent = res.pressed
+            ? "Pressed"
+            : "Released";
+        }
+      };
+
+      const micStartBtn = document.getElementById("micStart");
+      const micStopBtn = document.getElementById("micStop");
+      const micAudio = document.getElementById("micPlayback");
+
+      micStartBtn.onclick = async () => {
+        await apiCall("/api/debug/mic/start", "POST");
+        micStartBtn.disabled = true;
+        micStopBtn.disabled = false;
+        showToast("Recording…", "info");
+      };
+
+      micStopBtn.onclick = async () => {
+        const res = await apiCall("/api/debug/mic/stop", "POST");
+        if (res.audio_url) {
+          micAudio.src = res.audio_url;
+          micAudio.play();
+          showToast("Playback ready", "success");
+        }
+        micStartBtn.disabled = false;
+        micStopBtn.disabled = true;
+      };
     </script>
   </body>
 </html>
