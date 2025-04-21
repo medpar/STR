@@ -477,15 +477,13 @@
         });
       }
 
+      // *** MODIFIED: Removed AbortController and timeout logic ***
       async function apiCall(endpoint, method = "POST", body = null) {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 150000);
-
         try {
           const options = {
             method,
             headers: {},
-            signal: controller.signal, // Add abort signal
+            // signal: controller.signal, // <-- REMOVED
           };
           if (body) {
             if (body instanceof FormData) {
@@ -497,7 +495,7 @@
             }
           }
           const response = await fetch(endpoint, options);
-          clearTimeout(timeoutId); // Clear timeout if fetch succeeds
+          // clearTimeout(timeoutId); // <-- REMOVED
 
           let data;
           const contentType = response.headers.get("content-type");
@@ -526,15 +524,12 @@
           }
           return data;
         } catch (err) {
-          clearTimeout(timeoutId); // Clear timeout on error too
+          // clearTimeout(timeoutId); // <-- REMOVED
           console.error(`API call to ${endpoint} failed:`, err);
-          // Handle specific AbortError for timeouts
-          if (err.name === "AbortError") {
-            return {
-              success: false,
-              error: "Request timed out after 15 seconds.",
-            };
-          }
+          // Removed specific AbortError handling as timeout is removed
+          // if (err.name === "AbortError") {
+          //   return { success: false, error: "Request timed out." };
+          // }
           return {
             success: false,
             error: err.message || "Network or script error",

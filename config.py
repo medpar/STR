@@ -48,8 +48,8 @@ def find_device_by_name_fragment(p, name_fragments, is_input=True, threshold=0):
 
             log_config.debug(f"  Checking Dev {i}: '{info.get('name', 'N/A')}', {target_field}={channels}")
 
-            # Check channel count first
-            if channels > threshold:
+            # Check channel count first (allow 0 for threshold)
+            if channels >= threshold:
                 # Check if any fragment matches the device name
                 for fragment in name_fragments:
                     if fragment in device_name:
@@ -104,7 +104,7 @@ try:
     if final_mic_index is None: # Proceed with auto-detection if env var not used or invalid
         mic_detection_method = "Auto-Detect"
         # 1. Try specific names first (e.g., USB mics)
-        mic_result = find_device_by_name_fragment(p, ['usb', 'microphone'], is_input=True, threshold=0)
+        mic_result = find_device_by_name_fragment(p, ['usb', 'microphone'], is_input=True, threshold=1) # Require at least 1 channel
         if mic_result:
             final_mic_index, detected_mic_name = mic_result
             mic_detection_method += ": USB/Mic Name"
@@ -121,7 +121,12 @@ try:
                 final_mic_index = DEFAULT_MIC_INDEX
                 try: # Try to get name for fallback index
                     mic_info = p.get_device_info_by_index(final_mic_index)
-                    detected_mic_name = mic_info.get('name', f"Index {final_mic_index}")
+                    # Check if fallback is actually an input device
+                    if mic_info.get('maxInputChannels', 0) > 0:
+                        detected_mic_name = mic_info.get('name', f"Index {final_mic_index}")
+                    else:
+                        detected_mic_name = f"Fallback Index {final_mic_index} (Not Input)"
+                        log_config.error(f"Fallback Mic Index {final_mic_index} is not an input device!")
                 except Exception:
                      detected_mic_name = f"Fallback Index {final_mic_index} (Name N/A)"
                 mic_detection_method = "Fallback Index"
@@ -174,7 +179,12 @@ try:
                     final_dac_index = DEFAULT_DAC_INDEX
                     try: # Try to get name for fallback index
                          dac_info = p.get_device_info_by_index(final_dac_index)
-                         detected_dac_name = dac_info.get('name', f"Index {final_dac_index}")
+                         # Check if fallback is actually an output device
+                         if dac_info.get('maxOutputChannels', 0) > 0:
+                             detected_dac_name = dac_info.get('name', f"Index {final_dac_index}")
+                         else:
+                             detected_dac_name = f"Fallback Index {final_dac_index} (Not Output)"
+                             log_config.error(f"Fallback DAC Index {final_dac_index} is not an output device!")
                     except Exception:
                          detected_dac_name = f"Fallback Index {final_dac_index} (Name N/A)"
                     dac_detection_method = "Fallback Index"
@@ -207,7 +217,8 @@ MIC_NORMALISE: bool   = os.getenv("MIC_NORMALISE",      "1") == "1"
 # ------------------------------------------------------------------#
 DAC_PYAUDIO_INDEX: int = final_dac_index
 PLAYBACK_CHUNK: int    = 1024  # chunk size
-OUTPUT_SAMPLE_RATE: int = int(os.getenv("OUTPUT_SAMPLE_RATE", "44100")) # 48kHz often good for RPi DACs
+# *** CHANGE: Set default output rate to 44.1kHz ***
+OUTPUT_SAMPLE_RATE: int = int(os.getenv("OUTPUT_SAMPLE_RATE", "44100")) # Default to 44.1kHz
 
 # ------------------------------------------------------------------#
 # GPIO – push‑button + LED
@@ -237,7 +248,7 @@ ENABLE_GPIO: bool = ENABLE_GPIO_ENV and _IS_RPI
 # ------------------------------------------------------------------#
 # OpenAI Vector Store for File Search
 # ------------------------------------------------------------------#
-VECTOR_STORE_ID: str = os.getenv("VECTOR_STORE_ID", "vs_6800e568d74c8191927351dc5afbfd81")
+VECTOR_STORE_ID: str = os.getenv("VECTOR_STORE_ID", "")
 if not VECTOR_STORE_ID:
     log_config.warning("VECTOR_STORE_ID not set in environment. PDF features will fail.")
 
@@ -263,7 +274,8 @@ elif 'Fallback' in dac_detection_method or 'Default' in dac_detection_method:
     log_config.warning(" --> DAC detection fell back. Check PyAudio/ALSA setup if intended DAC wasn't found.")
     log_config.warning(" --> For RPi DAC, set DAC_PYAUDIO_INDEX environment variable for reliability.")
 
-log_config.info(f"Output Sample Rate: {OUTPUT_SAMPLE_RATE} Hz")
+# Log the chosen output sample rate
+log_config.info(f"Target Output Sample Rate: {OUTPUT_SAMPLE_RATE} Hz")
 log_config.info(f"GPIO Enabled: {ENABLE_GPIO}")
 if ENABLE_GPIO:
     log_config.info(f"  Button Pin: {GPIO_BUTTON_PIN} (Active High: {BUTTON_ACTIVE_HIGH})")
