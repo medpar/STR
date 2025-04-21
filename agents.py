@@ -23,6 +23,7 @@ def process_query(query: str) -> str:
         "You are a professional radio broadcaster. Provide a natural, broadcast-style answer without any URLs, links, or references in your response. "
         "Answer in castillian spanish. Use european format for all dates and units. Your response should always be in plain text, DO NOT use markdown. "
         "Answer very very briefly in maximum one paragraph."
+        "Always use web search to find the most recent information."
     )
     client = OpenAI()
     response = client.responses.create(
