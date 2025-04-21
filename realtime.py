@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Realtime speech-to-speech for STR.
-Handles audio input/output ensuring correct sample rates.
+Handles audio input/output. Plays back API audio at its native rate.
 """
 
 from __future__ import annotations
@@ -21,8 +21,9 @@ try:
                    if 'Raspberry Pi' in cpuinfo or 'BCM' in cpuinfo: # Broader check
                        _IS_RPI = True
               if _IS_RPI:
-                  GPIO.setmode(GPIO.BCM) # Basic check to see if lib works
-                  GPIO.cleanup() # Clean up any previous state
+                  # Basic check to see if lib works - avoid unnecessary cleanup here
+                  # We might need GPIO later for the button
+                  pass
          except Exception:
               _IS_RPI = False
               GPIO = None # Ensure GPIO object is None if setup fails
@@ -39,6 +40,7 @@ from config import (
 )
 
 # Use standard basicConfig, config.py will also log its values
+# If app.py already sets this up, these lines might be redundant but shouldn't harm.
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)5s | %(name)s | %(message)s",
@@ -46,11 +48,13 @@ logging.basicConfig(
 log = logging.getLogger("realtime")
 
 # --- Define Expected Rates ---
-# Rate expected *from* OpenAI Realtime API (Check OpenAI Docs for gpt-4o-mini realtime!)
-# Set to 16000 based on previous attempts, **VERIFY THIS**
+# Rate expected *from* OpenAI Realtime API (Check OpenAI Docs)
+# Set to 16000 based on common usage and WebSocket request. **VERIFY THIS**
+# If OpenAI sends a different rate, playback will be incorrect.
 API_AUDIO_OUTPUT_RATE = 16000
 # Rate to send *to* OpenAI Realtime API (Usually 16k or 24k, check docs)
-API_AUDIO_INPUT_RATE = 24000
+# We specify 24k in the websocket request, but let's try 16k for input matching whisper std.
+API_AUDIO_INPUT_RATE = 16000 # Changed to 16k for simplicity, ensure websocket req matches if needed
 
 INSTRUCTIONS = (
     "You are a professional radio broadcaster. Provide a natural, "
@@ -84,9 +88,8 @@ class AudioHandler:
              log.error(f"FATAL: Invalid microphone input rate determined: {self.input_rate}. Cannot proceed.")
              raise ValueError(f"Invalid microphone input rate: {self.input_rate}")
 
-
-        log.info(f"Mic Config: Index={self.device_index}, Input Rate={self.input_rate} Hz -> Target API Input Rate={API_AUDIO_INPUT_RATE} Hz")
-        log.info(f"Playback Config: Target API Output Rate={API_AUDIO_OUTPUT_RATE} Hz -> Target Device Rate={OUTPUT_SAMPLE_RATE} Hz")
+        log.info(f"Mic Config: Index={self.device_index}, Actual Input Rate={self.input_rate} Hz -> Target API Input Rate={API_AUDIO_INPUT_RATE} Hz (Resampling if needed)")
+        log.info(f"Playback Config: Expected API Output Rate={API_AUDIO_OUTPUT_RATE} Hz -> Playback at Native Rate on Device Index={DAC_PYAUDIO_INDEX} (or default)")
 
         self.input_stream = None
         self.recording = False
@@ -123,6 +126,11 @@ class AudioHandler:
                   try: self.input_stream.close()
                   except Exception: pass
              self.input_stream = None # Ensure stream is None on failure
+             # Terminate PyAudio if mic fails completely? Maybe too drastic.
+             # if self.p:
+             #      try: self.p.terminate()
+             #      except Exception: pass
+             #      self.p = None
              raise # Re-raise the exception to signal failure
 
 
@@ -144,24 +152,35 @@ class AudioHandler:
                     if gain > 1:
                         audio = np.clip(audio * gain, -32768, 32767).astype(np.int16)
 
-            # Downsampling for API (if necessary)
+            # Resampling for API Input (if necessary) - Keep this part
             target_api_rate = API_AUDIO_INPUT_RATE
             if self.input_rate != target_api_rate:
                 if self.input_rate < target_api_rate:
-                     log.warning(f"Mic input rate ({self.input_rate} Hz) is lower than API input rate ({target_api_rate} Hz). Upsampling not implemented, might affect quality.")
-                     # Send as is for now
+                     log.warning(f"Mic input rate ({self.input_rate} Hz) is lower than API input rate ({target_api_rate} Hz). Upsampling needed.")
+                     # Implement upsampling if needed, otherwise quality suffers
+                     factor = target_api_rate / self.input_rate
+                     num_samples_in = len(audio)
+                     num_samples_out = int(num_samples_in * factor)
+                     if num_samples_in > 0 and num_samples_out > 0:
+                         idx_orig = np.arange(num_samples_in)
+                         idx_new = np.linspace(0, num_samples_in - 1, num_samples_out)
+                         audio = np.interp(idx_new, idx_orig, audio).astype(np.int16)
+                         log.debug(f"Upsampled mic audio to {len(audio)} samples for API.")
+                     else:
+                         log.warning("Cannot upsample zero-length audio chunk.")
+                         return None
                 elif self.input_rate > target_api_rate:
                     log.debug(f"Resampling mic audio from {self.input_rate} Hz to {target_api_rate} Hz for API input...")
                     factor = self.input_rate / target_api_rate
                     num_samples_in = len(audio)
                     num_samples_out = int(num_samples_in / factor)
                     if num_samples_in == 0 or num_samples_out == 0:
-                         log.warning("Cannot resample zero-length audio chunk.")
+                         log.warning("Cannot downsample zero-length audio chunk.")
                          return None
                     idx_orig = np.arange(num_samples_in)
                     idx_new = np.linspace(0, num_samples_in - 1, num_samples_out)
                     audio = np.interp(idx_new, idx_orig, audio).astype(np.int16)
-                    log.debug(f" -> Resampled to {len(audio)} samples.")
+                    log.debug(f" -> Downsampled to {len(audio)} samples.")
 
             return audio.tobytes()
 
@@ -198,131 +217,110 @@ class AudioHandler:
 
     def play(self, data: bytes):
         """
-        Play API audio (received as raw PCM bytes).
-        Assumes input is API_AUDIO_OUTPUT_RATE Hz, mono, 16-bit.
-        Resamples to OUTPUT_SAMPLE_RATE stereo 16-bit, attempts DAC, falls back.
+        Play API audio (received as raw PCM bytes) at its NATIVE format.
+        Assumes input format matches API_AUDIO_OUTPUT_RATE, mono, 16-bit.
+        Attempts specified DAC_PYAUDIO_INDEX first, then falls back to default.
+        NO RESAMPLING OR CHANNEL CONVERSION IS DONE HERE.
         """
         if not data:
             log.warning("AudioHandler.play called with empty data.")
             return
 
-        # Define input format based on API expectation
-        in_rate = API_AUDIO_OUTPUT_RATE # **** CRITICAL: Use the correct rate ****
-        in_channels = 1 # API usually sends mono
-        in_width = 2 # API usually sends 16-bit
-
-        # Define target output format from config
-        target_rate = OUTPUT_SAMPLE_RATE
-        target_channels = 2 # Force Stereo
-        target_width = 2 # Force 16-bit (paInt16)
+        # Define input format based on API expectation (MUST BE ACCURATE)
+        in_rate = API_AUDIO_OUTPUT_RATE
+        in_channels = 1 # OpenAI Realtime usually sends mono
+        in_width = 2    # OpenAI Realtime usually sends 16-bit PCM
+        in_format = self.p.get_format_from_width(in_width) # Should be paInt16
 
         def _playback():
             stream = None
-            p_playback = None # Use a separate PyAudio instance for thread safety? Maybe overkill. Using self.p for now.
+            p_playback = self.p # Use the shared PyAudio instance
+
             try:
-                p_playback = self.p # Or pyaudio.PyAudio() if issues arise
+                log.debug(f"Received {len(data)} bytes of audio data (Expected Native Format: {in_rate}Hz, {in_channels}Ch, {in_width*8}-bit).")
 
-                # --- Prepare Data ---
-                log.debug(f"Received {len(data)} bytes of audio data (Expected Format: {in_rate}Hz, {in_channels}Ch, {in_width*8}-bit).")
-                # Ensure data length is multiple of sample width
-                if len(data) % in_width != 0:
-                     log.warning(f"Received audio data length ({len(data)}) is not multiple of sample width ({in_width}). Truncating.")
-                     data = data[:len(data) - (len(data) % in_width)]
+                # Ensure data length is multiple of sample width * channels
+                frame_size = in_width * in_channels
+                if len(data) % frame_size != 0:
+                     remainder = len(data) % frame_size
+                     log.warning(f"Received audio data length ({len(data)}) is not multiple of frame size ({frame_size}). Truncating last {remainder} bytes.")
+                     data = data[:-remainder]
 
-                samples = np.frombuffer(data, dtype=np.int16) # Assumes 16-bit input
+                if not data:
+                     log.warning("No audio data left after truncation. Skipping playback.")
+                     return
 
-                # --- Resample ---
-                resampled_samples = samples # Default if no resampling needed
-                if in_rate != target_rate:
-                    log.debug(f"Resampling API audio from {in_rate} Hz to {target_rate} Hz using np.interp...")
-                    num_samples_in = len(samples)
-                    num_samples_out = int(num_samples_in * target_rate / in_rate)
-
-                    if num_samples_in == 0 or num_samples_out == 0:
-                         log.warning("Cannot resample zero-length audio.")
-                         return # Exit playback thread
-
-                    idx_orig = np.arange(num_samples_in) # Original sample indices
-                    idx_new = np.linspace(0, num_samples_in - 1, num_samples_out) # Target sample indices
-                    resampled_samples = np.interp(idx_new, idx_orig, samples).astype(np.int16)
-                    log.debug(f" -> Resampled from {num_samples_in} to {len(resampled_samples)} samples.")
-                else:
-                    log.debug("API audio rate matches target rate. No resampling needed.")
-
-                # --- Convert to Stereo ---
-                stereo_samples = resampled_samples # Default if target is mono
-                if target_channels == 2:
-                    log.debug("Converting audio to stereo.")
-                    # Ensure input was mono before repeating
-                    if in_channels != 1:
-                         log.warning(f"Input audio had {in_channels} channels, expected 1 for stereo conversion. Taking first channel if interleaved.")
-                         # This assumes interleaved data if in_channels > 1
-                         resampled_samples = resampled_samples[::in_channels]
-
-                    stereo_samples = np.repeat(resampled_samples, 2) # Simple mono -> stereo duplication
-                elif target_channels == 1 and in_channels > 1:
-                     log.warning(f"Target is mono but input had {in_channels} channels. Taking first channel.")
-                     stereo_samples = resampled_samples[::in_channels] # Extract first channel
-
-
-                # --- Format for Output ---
-                out_fmt = p_playback.get_format_from_width(target_width) # Should be paInt16
-                output_data = stereo_samples.tobytes()
+                # --- NO RESAMPLING / FORMAT CONVERSION ---
+                # The data is played back exactly as received.
 
                 # --- Attempt to Open Stream (Primary DAC first, then Fallback) ---
+                # Open the stream with the NATIVE format received from the API
                 target_device_index = DAC_PYAUDIO_INDEX
                 stream = None
+                opened_device_info = "Unknown" # For logging
+
                 try:
                     device_info = p_playback.get_device_info_by_index(target_device_index)
-                    log.info(f"Realtime Play: Attempting DAC Index={target_device_index}, Name='{device_info.get('name', 'N/A')}' (Rate: {target_rate} Hz)")
+                    opened_device_info = f"Configured DAC: Index={target_device_index}, Name='{device_info.get('name', 'N/A')}'"
+                    log.info(f"Realtime Play: Attempting {opened_device_info} (Native Rate: {in_rate} Hz, {in_channels} Ch)")
                     stream = p_playback.open(
-                        format=out_fmt,
-                        channels=target_channels,
-                        rate=target_rate, # Use the TARGET rate
+                        format=in_format,
+                        channels=in_channels,
+                        rate=in_rate, # Use the NATIVE API rate
                         output=True,
                         output_device_index=target_device_index,
                         frames_per_buffer=PLAYBACK_CHUNK,
                     )
-                    log.info(f"Realtime Play: Successfully opened DAC Index={target_device_index}")
+                    log.info(f"Realtime Play: Successfully opened {opened_device_info}")
 
                 except Exception as e_dac:
-                    log.warning(f"Realtime Play: Failed DAC (Index={target_device_index}): {e_dac}. Trying default.")
+                    log.warning(f"Realtime Play: Failed {opened_device_info}: {e_dac}. Trying default.")
                     try:
                         default_output_info = p_playback.get_default_output_device_info()
                         default_output_index = default_output_info['index']
-                        log.info(f"Realtime Play: Attempting Default Index={default_output_index}, Name='{default_output_info.get('name', 'N/A')}' (Rate: {target_rate} Hz)")
+                        opened_device_info = f"Default Output: Index={default_output_index}, Name='{default_output_info.get('name', 'N/A')}'"
+                        log.info(f"Realtime Play: Attempting {opened_device_info} (Native Rate: {in_rate} Hz, {in_channels} Ch)")
                         stream = p_playback.open(
-                            format=out_fmt,
-                            channels=target_channels,
-                            rate=target_rate, # Use the TARGET rate
+                            format=in_format,
+                            channels=in_channels,
+                            rate=in_rate, # Use the NATIVE API rate
                             output=True,
                             output_device_index=None, # Let PyAudio choose default
                             frames_per_buffer=PLAYBACK_CHUNK,
                         )
-                        log.info(f"Realtime Play: Successfully opened Default Index={default_output_index}")
+                        log.info(f"Realtime Play: Successfully opened {opened_device_info}")
                     except Exception as e_default:
                         log.error(f"FATAL: Realtime Play: Failed to open both specified DAC and default output: {e_default}")
                         return # Cannot play
 
                 # --- Play Audio ---
-                log.info(f"Realtime Play: Playing {len(output_data)} bytes at {target_rate} Hz...")
-                stream.write(output_data)
-                stream.stop_stream() # Wait for buffer to finish
-                log.info("Realtime Play: Finished.")
+                log.info(f"Realtime Play: Playing {len(data)} bytes at {in_rate} Hz...")
+                # Write data in chunks (optional, could write all at once if chunks are small)
+                # Writing the whole chunk received from API might be simpler here
+                stream.write(data)
+                # If API sends very large chunks, chunking the write might be better:
+                # data_idx = 0
+                # chunk_size_bytes = PLAYBACK_CHUNK * in_channels * in_width # Rough estimate
+                # while data_idx < len(data):
+                #      chunk_to_write = data[data_idx : data_idx + chunk_size_bytes]
+                #      stream.write(chunk_to_write)
+                #      data_idx += len(chunk_to_write)
+
+                stream.stop_stream() # Wait for buffer to finish playing THIS chunk
+                log.info("Realtime Play: Finished playing chunk.")
 
             except Exception as e:
                 log.exception(f"Realtime Playback thread error: {e}")
             finally:
                 if stream is not None:
                     try:
+                        # Ensure stopped before closing
                         if stream.is_active(): stream.stop_stream()
                         stream.close()
                         log.debug("Realtime playback stream closed.")
                     except Exception as e_close:
                         log.error(f"Error closing realtime playback stream: {e_close}")
-                # Terminate the separate PyAudio instance if it was created
-                # if p_playback and p_playback != self.p:
-                #     p_playback.terminate()
+                # Do not terminate the shared PyAudio instance here
 
         # Start playback in a daemon thread
         threading.Thread(target=_playback, daemon=True).start()
@@ -331,7 +329,7 @@ class AudioHandler:
         """Clean up PyAudio resources."""
         log.info("Closing AudioHandler...")
         self.stop_input() # Ensure input stream is stopped and closed
-        # Output streams are handled in their own threads, but terminate the main PyAudio instance
+        # Output streams are handled in their own threads. Terminate the shared PyAudio instance.
         if self.p:
             try:
                 self.p.terminate()
@@ -362,12 +360,19 @@ class RealtimeClient:
         self.on_text = on_text
 
         try:
+            # Use a separate PyAudio instance for the RealtimeClient's AudioHandler
+            # to potentially avoid conflicts if audio_manager is used concurrently.
+            # This adds slight overhead but might increase stability.
+            # If conflicts aren't observed, could revert to sharing one.
             self.audio = AudioHandler(mic_index) # Handles mic input and audio playback
         except ValueError as e: # Catch rate error from AudioHandler init
              log.error(f"Failed to initialize AudioHandler: {e}")
              raise # Re-raise to prevent client from starting incorrectly
+        except Exception as e:
+             log.error(f"Unexpected error initializing AudioHandler: {e}")
+             raise
 
-        self._audio_buf = b"" # Buffer for incoming audio delta
+        self._audio_buf = b"" # Buffer for incoming audio delta (if needed, currently unused)
         self._text_buf = ""   # Buffer for incoming text delta
         self._rec_flag = threading.Event() # Controls the mic recording loop
 
@@ -379,21 +384,26 @@ class RealtimeClient:
         self.ws: websockets.WebSocketClientProtocol | None = None
         self.session_id: str | None = None
         self._connection_lock = asyncio.Lock() # Prevent concurrent connection attempts
-        # Block until initial connection attempt finishes
-        future = asyncio.run_coroutine_threadsafe(self.ensure_connected(), self.loop)
-        try:
-             future.result(timeout=15) # Wait with timeout
-             if not self.ws or not self.ws.open:
-                  raise ConnectionError("Initial WebSocket connection failed.")
-        except TimeoutError:
-             log.error("Timeout waiting for initial WebSocket connection.")
-             raise ConnectionError("Timeout during initial WebSocket connection.")
-        except Exception as e:
-             log.error(f"Error during initial WebSocket connection: {e}")
-             raise ConnectionError(f"Initial WebSocket connection failed: {e}")
-
-
         self._recv_task: asyncio.Task | None = None
+
+        # Block until initial connection attempt finishes - Moved into start() or similar?
+        # Blocking here can hang the main thread if connection fails badly.
+        # Let's attempt connection asynchronously and check status later.
+        # We will call ensure_connected before operations that need it.
+        # future = asyncio.run_coroutine_threadsafe(self.ensure_connected(), self.loop)
+        # try:
+        #      future.result(timeout=15) # Wait with timeout
+        #      if not self.ws or not self.ws.open:
+        #           raise ConnectionError("Initial WebSocket connection failed.")
+        # except TimeoutError:
+        #      log.error("Timeout waiting for initial WebSocket connection.")
+        #      # Don't raise here, allow app to potentially retry or show error state
+        #      # raise ConnectionError("Timeout during initial WebSocket connection.")
+        # except Exception as e:
+        #      log.error(f"Error during initial WebSocket connection: {e}")
+        #      # Don't raise here
+        #      # raise ConnectionError(f"Initial WebSocket connection failed: {e}")
+
 
         # GPIO Setup (only if enabled and available)
         self.gpio_enabled = HAS_GPIO and ENABLE_GPIO and GPIO is not None
@@ -402,20 +412,22 @@ class RealtimeClient:
         else:
             log.info("GPIO not available or disabled by config; hardware button/LED inactive.")
 
-        log.info(f"RealtimeClient configured for API Input: {API_AUDIO_INPUT_RATE}Hz, API Output: {API_AUDIO_OUTPUT_RATE}Hz")
+        log.info(f"RealtimeClient configured for API Input: {API_AUDIO_INPUT_RATE}Hz, Expected API Output: {API_AUDIO_OUTPUT_RATE}Hz")
 
     async def ensure_connected(self):
-        """Connects or reconnects the WebSocket."""
+        """Connects or reconnects the WebSocket. Returns True on success, False on failure."""
         async with self._connection_lock:
             if self.ws and self.ws.open:
                 log.debug("WebSocket already connected.") # Less noisy
-                return
+                return True
 
             if self.ws and not self.ws.closed:
-                log.warning("WebSocket exists but is not open. Closing before reconnecting.")
+                log.warning("WebSocket exists but is not open/closed state unclear. Closing before reconnecting.")
                 try:
                      await self.ws.close()
                 except Exception: pass # Ignore errors during close if reconnecting anyway
+            self.ws = None # Ensure it's None before reconnect attempt
+            self.session_id = None # Clear session ID
 
             log.info("Attempting WebSocket connection...")
             ssl_ctx = ssl.create_default_context()
@@ -423,13 +435,14 @@ class RealtimeClient:
             ssl_ctx.verify_mode = ssl.CERT_NONE
 
             # *** CRITICAL: Ensure requested format matches API_AUDIO_OUTPUT_RATE ***
-            # Construct format string like "pcm_16" or "pcm_24"
+            # Format string like "pcm_16" or "pcm_24"
             requested_api_output_format = f"pcm_{API_AUDIO_OUTPUT_RATE // 1000}"
+            # *** CRITICAL: Ensure input format sample_rate matches API_AUDIO_INPUT_RATE ***
+            # We are now using 16k for input. The encoding 'pcm_16' refers to bit depth.
             requested_api_input_format = {"encoding": "pcm_16", "sample_rate": API_AUDIO_INPUT_RATE}
 
             log.info(f"Requesting API Output Format: {requested_api_output_format}")
-            log.info(f"Sending API Input Format: {requested_api_input_format['sample_rate']}Hz")
-
+            log.info(f"Sending API Input Format: {requested_api_input_format['sample_rate']}Hz, {requested_api_input_format['encoding']}")
 
             try:
                 self.ws = await websockets.connect(
@@ -437,6 +450,9 @@ class RealtimeClient:
                     extra_headers={"Authorization": f"Bearer {self.api_key}"},
                     ssl=ssl_ctx,
                     open_timeout=10, # Add timeout
+                    close_timeout=5,
+                    ping_interval=20, # Keep connection alive
+                    ping_timeout=10
                 )
                 log.info("WebSocket connection established. Sending session configuration.")
                 await self.ws.send(json.dumps({
@@ -458,39 +474,48 @@ class RealtimeClient:
                      log.info(f"WebSocket session ready. Session ID: {self.session_id}")
                      # Start receive loop only after successful connection
                      if self._recv_task and not self._recv_task.done():
+                         log.warning("Cancelling existing receive task before starting new one.")
                          self._recv_task.cancel()
+                         try: await self._recv_task # Allow cancellation to complete
+                         except asyncio.CancelledError: pass
                      self._recv_task = asyncio.create_task(self._recv_loop())
+                     log.info("Receive loop task created.")
+                     return True # Connection successful
                 else:
                      log.error(f"Unexpected message after connect (expected session_begins): {session_data}")
                      await self.ws.close()
                      self.ws = None
                      self.session_id = None
+                     return False # Connection failed
 
             except websockets.exceptions.InvalidStatusCode as e:
                  log.error(f"WebSocket connection failed (Invalid Status Code): {e.status_code} {e.body}")
-                 self.ws = None
-                 self.session_id = None
             except asyncio.TimeoutError:
-                 log.error("WebSocket connection/session begin timed out.")
-                 self.ws = None
-                 self.session_id = None
+                 log.error("WebSocket connection or session begin timed out.")
+            except websockets.exceptions.ConnectionClosed as e:
+                 log.error(f"WebSocket connection closed during setup: {e.code} {e.reason}")
+            except OSError as e:
+                 log.error(f"WebSocket connection failed (OS Error): {e}")
             except Exception as e:
                  log.exception(f"WebSocket connection failed: {e}")
-                 if self.ws and not self.ws.closed: # Try to close if partially opened
-                      try: await self.ws.close()
-                      except Exception: pass
-                 self.ws = None
-                 self.session_id = None
 
+            # Ensure cleanup on failure
+            if self.ws and not self.ws.closed:
+                 try: await self.ws.close()
+                 except Exception: pass
+            self.ws = None
+            self.session_id = None
+            return False # Connection failed
 
     async def _recv_loop(self):
         if not self.ws:
-            log.error("Receive loop started without a WebSocket connection.")
-            return
+            log.error("Receive loop cannot start: WebSocket is not connected.")
+            return # Should not happen if started correctly
+
         log.info("WebSocket receive loop started.")
         try:
             async for message in self.ws:
-                #log.debug(f"WS RECV: {message[:100]}") # Debug: log received messages
+                #log.debug(f"WS RECV: Type={type(message)}, Len={len(message) if isinstance(message, (str, bytes)) else 'N/A'}") # Debug
                 if isinstance(message, str):
                     try:
                         ev = json.loads(message)
@@ -498,20 +523,21 @@ class RealtimeClient:
                     except json.JSONDecodeError:
                         log.warning(f"Received non-JSON message: {message[:100]}...")
                 elif isinstance(message, bytes):
-                     log.warning(f"Received unexpected binary data ({len(message)} bytes).")
+                     log.warning(f"Received unexpected binary data ({len(message)} bytes). Ignoring.")
         except websockets.exceptions.ConnectionClosedOK:
-            log.info("WebSocket connection closed normally.")
+            log.info("WebSocket connection closed normally (ClosedOK).")
         except websockets.exceptions.ConnectionClosedError as e:
-            log.error(f"WebSocket connection closed with error: {e.code} {e.reason}")
-            await self.close_connection() # Ensure clean state
+            log.error(f"WebSocket connection closed with error (ClosedError): {e.code} {e.reason}")
+        except websockets.exceptions.ConnectionClosed as e: # Catch generic ConnectionClosed
+            log.warning(f"WebSocket connection closed unexpectedly: {e.code} {e.reason}")
         except asyncio.CancelledError:
              log.info("Receive loop cancelled.")
         except Exception as e:
             log.exception(f"WebSocket receive loop error: {e}")
         finally:
             log.info("WebSocket receive loop finished.")
-            self.ws = None # Mark connection as closed
-            self.session_id = None
+            # Don't set self.ws = None here, let ensure_connected handle state checking.
+            # If the loop ends due to closure, self.ws.open will be false.
 
     async def _handle_event(self, ev: dict):
         """Handles JSON events received from the WebSocket."""
@@ -522,28 +548,27 @@ class RealtimeClient:
             if audio_chunk_b64:
                 try:
                     audio_chunk = base64.b64decode(audio_chunk_b64)
-                    #log.debug(f"Received audio chunk: {len(audio_chunk)} bytes")
-                    # Immediately play the chunk - buffering can cause delays/desync
+                    #log.debug(f"Received audio chunk: {len(audio_chunk)} bytes - playing immediately.")
+                    # Play the chunk without buffering
                     self.audio.play(audio_chunk)
                 except Exception as e:
                     log.error(f"Error decoding/playing audio chunk: {e}")
-            else:
-                 log.warning(f"Received audio event with no chunk: {ev}")
+            # else:
+                 # log.warning(f"Received audio event with no chunk: {ev}") # Can be noisy
 
         elif event_type == "text":
              text_delta = ev.get("text")
              if text_delta is not None: # Check for None explicitly
                   # Broadcasting deltas might be too noisy for UI, buffer for final.
-                  # If real-time transcription display is needed, handle 'transcript' events.
                   self._text_buf += text_delta
-             else:
-                  log.warning(f"Received text event with no text: {ev}")
+             # else:
+                  # log.warning(f"Received text event with no text: {ev}") # Can be noisy
 
         elif event_type == "transcript": # Handle transcriptions if needed
              transcript_text = ev.get("text")
              is_final = ev.get("final", False)
              log.info(f"Transcript{' (Final)' if is_final else ''}: {transcript_text}")
-             # Optionally display transcripts in UI
+             # Optionally display transcripts in UI / use for context
 
         elif event_type == "speech_end":
              log.info("Received speech_end event.")
@@ -559,12 +584,14 @@ class RealtimeClient:
                   self._text_buf = "" # Ensure buffer is clear
 
         elif event_type == "session_terminates":
-             log.info(f"WebSocket session terminated by server. Reason: {ev.get('reason', 'N/A')}")
-             await self.close_connection()
+             log.warning(f"WebSocket session terminated by server. Reason: {ev.get('reason', 'N/A')}")
+             await self.close_connection(reason="Session terminated by server") # Close our side
 
         elif event_type == "error":
             log.error(f"API Error received: {ev.get('message', 'No message')}")
-            # Optionally close connection on severe errors
+            # Optionally close connection on severe errors, e.g. auth errors
+            if "authentication failed" in ev.get('message', '').lower():
+                 await self.close_connection(reason="API Authentication Error")
 
         elif event_type == "latency": # Handle latency info if provided
              log.debug(f"Latency Info: {ev}")
@@ -577,12 +604,19 @@ class RealtimeClient:
 
     async def _mic_stream_sender(self):
         """Reads from mic and sends audio data over WebSocket."""
-        await self.ensure_connected() # Ensure connection before starting
-        if not self.ws or not self.ws.open:
-            log.error("Cannot start mic stream: WebSocket not connected after ensure_connected.")
-            self._rec_flag.clear() # Ensure flag is off
-            # Possibly signal UI error?
+        log.info("Attempting to start mic stream sender...")
+        # Ensure connection before starting mic
+        if not await self.ensure_connected():
+            log.error("Cannot start mic stream sender: WebSocket connection failed.")
+            self._rec_flag.clear() # Ensure flag is off if connection failed
+            # Signal UI error?
             return
+
+        # Now self.ws should be valid if ensure_connected returned True
+        if not self.ws or not self.ws.open:
+             log.error("Cannot start mic stream sender: WebSocket is not open after ensure_connected.")
+             self._rec_flag.clear()
+             return
 
         try:
             self.audio.start_input() # Open the mic stream
@@ -595,61 +629,75 @@ class RealtimeClient:
         log.info("Microphone stream sending loop started.")
         try:
             while self._rec_flag.is_set():
+                # Check connection at the start of each loop iteration
+                if not self.ws or not self.ws.open:
+                    log.warning("WebSocket closed during mic stream. Stopping sender.")
+                    self._rec_flag.clear()
+                    break
+
                 chunk = self.audio.read_chunk()
                 if chunk:
-                    if self.ws and self.ws.open:
-                        try:
-                            #log.debug(f"WS SEND: Audio chunk {len(chunk)} bytes") # Debug
-                            await self.ws.send(json.dumps({
-                                 "event": "audio_chunk",
-                                 "chunk": base64.b64encode(chunk).decode('utf-8')
-                            }))
-                        except websockets.exceptions.ConnectionClosed:
-                            log.warning("WebSocket closed while trying to send audio. Stopping mic stream.")
-                            self._rec_flag.clear() # Signal loop to stop
-                            break
-                        except Exception as e:
-                             log.exception(f"Error sending audio chunk: {e}")
-                             self._rec_flag.clear() # Stop on error
-                             break
-                    else:
-                         log.warning("WebSocket closed unexpectedly during mic stream. Stopping.")
-                         self._rec_flag.clear()
+                    try:
+                        #log.debug(f"WS SEND: Audio chunk {len(chunk)} bytes") # Debug
+                        await self.ws.send(json.dumps({
+                             "event": "audio_chunk",
+                             "chunk": base64.b64encode(chunk).decode('utf-8')
+                        }))
+                    except websockets.exceptions.ConnectionClosed:
+                        log.warning("WebSocket closed while trying to send audio. Stopping mic stream.")
+                        self._rec_flag.clear() # Signal loop to stop
+                        break
+                    except Exception as e:
+                         log.exception(f"Error sending audio chunk: {e}")
+                         self._rec_flag.clear() # Stop on error
                          break
                 else:
                     # Small sleep if read_chunk returns None (e.g., overflow or just no data)
+                    # Prevents tight loop on no data
                     await asyncio.sleep(0.01)
+
         except Exception as e:
              log.exception(f"Error in mic stream sending loop: {e}")
         finally:
             log.info("Microphone stream sending loop finished.")
             self.audio.stop_input() # Ensure mic is stopped
 
-            # Send end_of_audio signal - check if API requires this
+            # Send end_of_audio signal if connection is still open
             if self.ws and self.ws.open:
                 try:
                     log.info("Sending end_of_audio signal.")
                     await self.ws.send(json.dumps({"event": "end_of_audio"}))
+                except websockets.exceptions.ConnectionClosed:
+                     log.warning("Could not send end_of_audio: WebSocket closed.")
                 except Exception as e:
                     log.error(f"Failed to send end_of_audio signal: {e}")
 
 
     async def _send_text_async(self, text: str):
         """Sends a text message over the WebSocket."""
-        await self.ensure_connected() # Ensure connection before sending
+        log.info(f"Attempting to send text: '{text[:30]}...'")
+        # Ensure connection before sending
+        if not await self.ensure_connected():
+             log.error(f"Cannot send text '{text[:30]}...': WebSocket connection failed.")
+             # Signal UI error?
+             return
+
         if not self.ws or not self.ws.open:
-            log.error(f"Cannot send text '{text[:20]}...': WebSocket not connected.")
-            # Signal UI error?
+            log.error(f"Cannot send text '{text[:30]}...': WebSocket not open after ensure_connected.")
             return
 
-        log.info(f"Sending text message: {text}")
+        log.info(f"Sending text message via WebSocket: {text}")
         try:
             # Ensure text buffer is clear if sending explicit text
             self._text_buf = ""
             await self.ws.send(json.dumps({
-                "event": "text_input", # Check API for correct event name
+                "event": "text_input", # Verify this event name with OpenAI docs
                 "text": text
             }))
+            log.info("Text message sent successfully.")
+        except websockets.exceptions.ConnectionClosed:
+             log.error(f"Failed to send text message: WebSocket closed.")
+             # No need to close here, recv loop or next ensure_connected will handle it.
         except Exception as e:
              log.exception(f"Failed to send text message: {e}")
 
@@ -663,7 +711,10 @@ class RealtimeClient:
             log.info("Mic stream sender task scheduled.")
             # Update GPIO LED if enabled
             if self.gpio_enabled:
-                try: GPIO.output(GPIO_LED_PIN, GPIO.HIGH)
+                try:
+                    # Ensure pin is configured before using
+                    if GPIO_LED_PIN > 0:
+                        GPIO.output(GPIO_LED_PIN, GPIO.HIGH)
                 except Exception as e: log.error(f"GPIO Error setting LED HIGH: {e}")
         else:
             log.warning("Start talking requested, but already recording.")
@@ -677,7 +728,10 @@ class RealtimeClient:
             log.info("Mic stream sender task signaled to stop.")
             # Update GPIO LED if enabled
             if self.gpio_enabled:
-                 try: GPIO.output(GPIO_LED_PIN, GPIO.LOW)
+                 try:
+                    # Ensure pin is configured before using
+                    if GPIO_LED_PIN > 0:
+                        GPIO.output(GPIO_LED_PIN, GPIO.LOW)
                  except Exception as e: log.error(f"GPIO Error setting LED LOW: {e}")
         else:
             log.warning("Stop talking requested, but not currently recording.")
@@ -687,72 +741,125 @@ class RealtimeClient:
         if not text:
             log.warning("Send text requested with empty message.")
             return
+        if not self.loop.is_running():
+             log.error("Cannot send text: Asyncio loop is not running.")
+             return
         # Run the text sender coroutine in the event loop
         asyncio.run_coroutine_threadsafe(self._send_text_async(text), self.loop)
 
-    async def close_connection(self):
+    async def close_connection(self, reason="Client initiated close"):
          """Closes the WebSocket connection gracefully."""
-         log.info("Closing WebSocket connection...")
+         log.info(f"Closing WebSocket connection ({reason})...")
+
+         # Stop recording if active
+         if self._rec_flag.is_set():
+             log.warning("Stopping active recording during connection close.")
+             self.stop_talking() # This will signal the sender loop
+
          # Cancel receive task first
          if self._recv_task and not self._recv_task.done():
+              log.debug("Cancelling receive task...")
               self._recv_task.cancel()
-              try: await self._recv_task
-              except asyncio.CancelledError: pass # Expected
-              except Exception as e: log.error(f"Error during receive task cancellation: {e}")
+              try:
+                  await asyncio.wait_for(self._recv_task, timeout=1.0) # Give it time to cancel
+              except asyncio.CancelledError:
+                  log.debug("Receive task successfully cancelled.")
+              except asyncio.TimeoutError:
+                   log.warning("Timeout waiting for receive task to cancel.")
+              except Exception as e:
+                  log.error(f"Error awaiting receive task cancellation: {e}")
          self._recv_task = None
 
          # Close WebSocket
          ws_to_close = self.ws
-         self.ws = None # Mark as None immediately to prevent further use
+         # Mark as None immediately to prevent race conditions with ensure_connected
+         self.ws = None
          self.session_id = None
+
          if ws_to_close and not ws_to_close.closed:
+             log.debug("Sending close frame to WebSocket...")
              try:
-                 await ws_to_close.close()
-                 log.info("WebSocket connection closed.")
+                 await asyncio.wait_for(ws_to_close.close(reason=reason), timeout=3.0)
+                 log.info("WebSocket connection closed gracefully.")
+             except asyncio.TimeoutError:
+                  log.warning("Timeout waiting for WebSocket close frame response.")
              except Exception as e:
                  log.error(f"Error closing WebSocket: {e}")
+         else:
+             log.debug("WebSocket already closed or not initialized.")
 
 
     def close(self):
         """Shuts down the client, closing audio resources and WebSocket."""
         log.info("Shutting down RealtimeClient...")
-        self.stop_talking() # Ensure recording stops
+
+        # Ensure recording stops (calls stop_talking)
+        if self._rec_flag.is_set():
+            self.stop_talking()
+            # Give a brief moment for stop signal to propagate if needed
+            time.sleep(0.1)
 
         # Close WebSocket connection from the main thread via the loop
         if self.loop.is_running():
-             future = asyncio.run_coroutine_threadsafe(self.close_connection(), self.loop)
-             try: future.result(timeout=5) # Wait for close to complete
-             except TimeoutError: log.warning("Timeout waiting for WebSocket close.")
-             except Exception as e: log.error(f"Error waiting for WebSocket close: {e}")
+             log.debug("Scheduling WebSocket close via event loop...")
+             future = asyncio.run_coroutine_threadsafe(self.close_connection(reason="Client shutdown"), self.loop)
+             try:
+                 future.result(timeout=5) # Wait for close task to complete
+                 log.debug("WebSocket close task completed.")
+             except TimeoutError:
+                 log.warning("Timeout waiting for WebSocket close task.")
+             except Exception as e:
+                 log.error(f"Error waiting for WebSocket close task: {e}")
 
         # Stop the event loop thread
         if self.loop.is_running():
+            log.debug("Stopping asyncio event loop...")
             self.loop.call_soon_threadsafe(self.loop.stop)
             # Don't necessarily join, let daemon thread exit
             # self._loop_thread.join(timeout=2)
+            log.debug("Event loop stop scheduled.")
 
-        # Close audio resources
-        self.audio.close()
+        # Close audio resources (this also terminates its PyAudio instance)
+        if self.audio:
+            self.audio.close()
+            self.audio = None # Clear reference
 
         # Cleanup GPIO
         if self.gpio_enabled and GPIO:
             log.info("Cleaning up GPIO...")
             try:
-                # Remove event detection first
-                try: GPIO.remove_event_detect(GPIO_BUTTON_PIN)
-                except Exception: pass # Ignore if not set up
-                # Ensure LED is off
-                try: GPIO.output(GPIO_LED_PIN, GPIO.LOW)
-                except Exception: pass
+                # Remove event detection first if button pin was valid
+                if GPIO_BUTTON_PIN > 0:
+                    try: GPIO.remove_event_detect(GPIO_BUTTON_PIN)
+                    except RuntimeError as e: # Catch if channel wasn't set up for edge detection
+                         log.debug(f"Ignoring GPIO remove_event_detect error (likely not set): {e}")
+                    except Exception as e:
+                         log.error(f"Error removing GPIO event detect: {e}")
+
+                # Ensure LED is off if valid
+                if GPIO_LED_PIN > 0:
+                    try: GPIO.output(GPIO_LED_PIN, GPIO.LOW)
+                    except Exception as e: log.error(f"GPIO Error setting LED LOW during cleanup: {e}")
+
                 # Cleanup pins used
                 pins_to_cleanup = []
                 if GPIO_BUTTON_PIN > 0: pins_to_cleanup.append(GPIO_BUTTON_PIN)
                 if GPIO_LED_PIN > 0: pins_to_cleanup.append(GPIO_LED_PIN)
                 if pins_to_cleanup:
+                     log.debug(f"Calling GPIO.cleanup for pins: {pins_to_cleanup}")
                      GPIO.cleanup(pins_to_cleanup)
+                else:
+                     # Call general cleanup if specific pins weren't identified but GPIO was thought enabled
+                     log.debug("Calling general GPIO.cleanup()")
+                     GPIO.cleanup()
+
                 log.info("GPIO cleanup successful.")
             except Exception as e:
                 log.error(f"Error during GPIO cleanup: {e}")
+        elif ENABLE_GPIO and not HAS_GPIO:
+             # Log if GPIO was enabled in config but failed to load/init
+             log.warning("GPIO was enabled in config but library/hardware init failed earlier. No cleanup needed.")
+
 
         log.info("RealtimeClient shutdown complete.")
 
@@ -760,48 +867,81 @@ class RealtimeClient:
     # --- GPIO Handling ---
     def _setup_gpio(self):
         """Sets up GPIO pins for button and LED."""
-        if not (GPIO and GPIO_BUTTON_PIN > 0 and GPIO_LED_PIN > 0):
-             log.warning("GPIO setup skipped: Library not available or pins not configured (>0).")
+        # Check library again just in case
+        if not GPIO:
+            log.warning("GPIO setup skipped: Library not available.")
+            self.gpio_enabled = False
+            return
+
+        # Check if pins are configured (simple check for > 0)
+        button_pin_valid = GPIO_BUTTON_PIN > 0
+        led_pin_valid = GPIO_LED_PIN > 0
+
+        if not (button_pin_valid or led_pin_valid):
+             log.warning("GPIO setup skipped: Neither Button nor LED pin is configured (must be > 0).")
              self.gpio_enabled = False
              return
 
         log.info("Setting up GPIO...")
         try:
+            # Explicitly set mode just before setup
             GPIO.setmode(GPIO.BCM)
-            # Set up LED pin
-            GPIO.setup(GPIO_LED_PIN, GPIO.OUT, initial=GPIO.LOW)
-            # Set up Button pin
-            pull_resistor = GPIO.PUD_UP if not BUTTON_ACTIVE_HIGH else GPIO.PUD_DOWN
-            GPIO.setup(GPIO_BUTTON_PIN, GPIO.IN, pull_up_down=pull_resistor)
+            GPIO.setwarnings(False) # Suppress warnings like 'channel already in use'
 
-            # Add event detection for the button press
-            edge_detection = GPIO.FALLING if not BUTTON_ACTIVE_HIGH else GPIO.RISING
-            GPIO.add_event_detect(
-                GPIO_BUTTON_PIN,
-                edge_detection,
-                callback=self._button_callback,
-                bouncetime=300 # Debounce time in milliseconds
-            )
-            log.info(f"GPIO setup complete. Button Pin: {GPIO_BUTTON_PIN} (Edge: {'Falling' if edge_detection == GPIO.FALLING else 'Rising'}), LED Pin: {GPIO_LED_PIN}")
+            # Set up LED pin if valid
+            if led_pin_valid:
+                GPIO.setup(GPIO_LED_PIN, GPIO.OUT, initial=GPIO.LOW)
+                log.info(f"  - LED Pin ({GPIO_LED_PIN}) setup as OUT.")
+            else:
+                 log.info("  - LED Pin not configured.")
+
+            # Set up Button pin if valid
+            if button_pin_valid:
+                pull_resistor = GPIO.PUD_UP if not BUTTON_ACTIVE_HIGH else GPIO.PUD_DOWN
+                GPIO.setup(GPIO_BUTTON_PIN, GPIO.IN, pull_up_down=pull_resistor)
+                log.info(f"  - Button Pin ({GPIO_BUTTON_PIN}) setup as IN (Pull: {'UP' if pull_resistor == GPIO.PUD_UP else 'DOWN'}).")
+
+                # Add event detection for the button press
+                edge_detection = GPIO.FALLING if not BUTTON_ACTIVE_HIGH else GPIO.RISING
+                # Clear any previous detection on this pin first
+                try: GPIO.remove_event_detect(GPIO_BUTTON_PIN)
+                except Exception: pass # Ignore if not set
+                GPIO.add_event_detect(
+                    GPIO_BUTTON_PIN,
+                    edge_detection,
+                    callback=self._button_callback,
+                    bouncetime=300 # Debounce time in milliseconds
+                )
+                log.info(f"  - Button event detection added (Edge: {'Falling' if edge_detection == GPIO.FALLING else 'Rising'}).")
+            else:
+                 log.info("  - Button Pin not configured.")
+
+            self.gpio_enabled = True # Mark as enabled only if setup succeeds
+            log.info("GPIO setup complete.")
 
         except Exception as e:
             log.exception(f"Failed to setup GPIO: {e}")
-            self.gpio_enabled = False # Disable GPIO if setup fails
+            self.gpio_enabled = False # Disable GPIO functionality if setup fails
+            # Attempt cleanup if setup failed partially
+            try: GPIO.cleanup()
+            except Exception: pass
 
     def _button_callback(self, channel):
         """Callback function executed on button press detected by GPIO event."""
-        # Debounce check (optional, RPi.GPIO bouncetime should handle it)
-        # time.sleep(0.05) # Short delay
-        # current_state = GPIO.input(channel)
-        # expected_state = GPIO.LOW if not BUTTON_ACTIVE_HIGH else GPIO.HIGH
-        # if current_state != expected_state: return # Ignore if state bounced back
+        # Basic check to ensure it's the configured button pin triggering
+        if channel != GPIO_BUTTON_PIN:
+             log.warning(f"GPIO callback triggered on unexpected channel {channel}. Ignoring.")
+             return
 
         log.info(f"Button press detected on channel {channel}.")
-        if not self.loop.is_running():
-            log.warning("GPIO callback triggered, but asyncio loop is not running.")
+        if not self.loop or not self.loop.is_running():
+            log.warning("GPIO callback triggered, but asyncio loop is not running. Action skipped.")
             return
 
+        # Use call_soon_threadsafe as this callback runs in a separate thread managed by RPi.GPIO
         if self._rec_flag.is_set():
+             log.debug("Button toggling: Requesting stop talking.")
              self.loop.call_soon_threadsafe(self.stop_talking)
         else:
+             log.debug("Button toggling: Requesting start talking.")
              self.loop.call_soon_threadsafe(self.start_talking)

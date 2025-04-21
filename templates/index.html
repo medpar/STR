@@ -285,9 +285,12 @@
               id="pdfQA"
               class="hidden flex flex-col sm:flex-row gap-3 mt-2 items-center"
             >
-              <input type="text" <!-- Changed from textarea to input -- />
-              id="pdfQuestion" class="input-box flex-grow" placeholder="Pregunta
-              sobre tu PDF (Enter para enviar)" />
+              <input
+                type="text"
+                id="pdfQuestion"
+                class="input-box flex-grow"
+                placeholder="Pregunta sobre tu PDF (Enter para enviar)"
+              />
               <div class="flex gap-2 flex-shrink-0">
                 <button id="pdfAsk" class="btn btn-primary">Preguntar</button>
                 <button id="pdfClear" class="btn btn-secondary">Limpiar</button>
@@ -476,7 +479,7 @@
 
       async function apiCall(endpoint, method = "POST", body = null) {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 second timeout
+        const timeoutId = setTimeout(() => controller.abort(), 150000);
 
         try {
           const options = {
