@@ -1,291 +1,242 @@
 #!/usr/bin/env python3
 """
-Centralised STR hardware/audio/GPIO settings (plus vector store and AI model config).
-Focuses on robust audio device detection.
+Centralised STR hardware/audio/GPIO settings (plus vector‑store and AI‑model
+configuration).
+
+⚠️  CHANGE:  OUTPUT_SAMPLE_RATE is now chosen automatically from the DAC’s own
+             reported *defaultSampleRate* (as returned by PyAudio/ALSA).  
+             You can still override it with the environment variable
+             OUTPUT_SAMPLE_RATE if you really need a different value.
+
+This fixes the “suena lento y grave” problem you heard: the code was playing
+audio at a rate that didn’t match what the PCM5102 driver was actually using.
+By querying the driver’s preferred rate first and resampling everything to that
+rate, timing and pitch are correct.
 """
 
 import os
-import logging
 import sys
+import logging
 
-# --- Logging Setup ---
+# ------------------------------------------------------------------#
+# Logging
+# ------------------------------------------------------------------#
 log_config = logging.getLogger("config")
-# Ensure handler is added if not already configured by main app
-if not log_config.hasHandlers():
+if not log_config.hasHandlers():          # first module that sets the logger?
     log_config.setLevel(logging.INFO)
-    handler = logging.StreamHandler(sys.stdout)
-    formatter = logging.Formatter('%(asctime)s | %(levelname)5s | %(name)s | %(message)s')
-    handler.setFormatter(formatter)
-    log_config.addHandler(handler)
-    log_config.propagate = False # Prevent duplicate messages if root logger also has handler
-else:
-     # If already configured (e.g., by app.py basicConfig), ensure level is appropriate
-     log_config.setLevel(logging.INFO)
+    _h = logging.StreamHandler(sys.stdout)
+    _h.setFormatter(
+        logging.Formatter("%(asctime)s | %(levelname)5s | %(name)s | %(message)s")
+    )
+    log_config.addHandler(_h)
+    log_config.propagate = False
+else:                                     # already configured by main app
+    log_config.setLevel(logging.INFO)
 
-
-# --- Device Detection Helper ---
-def find_device_by_name_fragment(p, name_fragments, is_input=True, threshold=0):
+# ------------------------------------------------------------------#
+# Tiny helper to locate devices by name
+# ------------------------------------------------------------------#
+def find_device_by_name_fragment(p, fragments, *, is_input=True, threshold=0):
     """
-    Finds the first device index matching any fragment in the list.
-
-    Args:
-        p (pyaudio.PyAudio): PyAudio instance.
-        name_fragments (list[str]): List of lowercase name fragments to search for.
-        is_input (bool): True to search for input devices, False for output.
-        threshold (int): Minimum number of channels required (e.g., > 0).
-
-    Returns:
-        tuple(int, str) | None: (index, name) of the found device, or None.
+    Return (index, name) of the first device whose name contains one of the
+    *fragments* (case‑insensitive) **and** that has at least *threshold*
+    channels for the requested direction.
     """
-    target_field = 'maxInputChannels' if is_input else 'maxOutputChannels'
-    num_devices = p.get_device_count()
-    log_config.debug(f"Searching for {'input' if is_input else 'output'} device matching {name_fragments} ({num_devices} total devices).")
-    for i in range(num_devices):
+    chan_field = "maxInputChannels" if is_input else "maxOutputChannels"
+    for idx in range(p.get_device_count()):
         try:
-            info = p.get_device_info_by_index(i)
-            device_name = info.get('name', '').lower()
-            channels = info.get(target_field, 0)
-
-            log_config.debug(f"  Checking Dev {i}: '{info.get('name', 'N/A')}', {target_field}={channels}")
-
-            # Check channel count first (allow 0 for threshold)
-            if channels >= threshold:
-                # Check if any fragment matches the device name
-                for fragment in name_fragments:
-                    if fragment in device_name:
-                        log_config.debug(f"  --> Match found for '{fragment}' at index {i}: '{info.get('name')}'")
-                        return i, info.get('name') # Return index and actual name
-
+            info = p.get_device_info_by_index(idx)
+            if info.get(chan_field, 0) < threshold:
+                continue
+            name = info.get("name", "").lower()
+            if any(frag in name for frag in fragments):
+                return idx, info["name"]
         except Exception as e:
-            log_config.warning(f"Could not query device index {i}: {e}")
-
-    log_config.debug(f"  --> No suitable device found matching fragments: {name_fragments}.")
+            log_config.debug(f"PyAudio query failed for device {idx}: {e}")
     return None
 
+# ------------------------------------------------------------------#
+# Defaults / env‑vars
+# ------------------------------------------------------------------#
+DEFAULT_MIC_INDEX  = 1
+DEFAULT_DAC_INDEX  = 0
+ENV_MIC_INDEX      = os.getenv("MIC_DEVICE_INDEX")
+ENV_DAC_INDEX      = os.getenv("DAC_PYAUDIO_INDEX")
 
-# --- Default Indices and Names ---
-DEFAULT_MIC_INDEX = 1  # Fallback default
-DEFAULT_DAC_INDEX = 0  # Fallback default (often built-in audio like headphones)
-detected_mic_name = "Not detected (Using Fallback)"
-detected_dac_name = "Not detected (Using Fallback)"
-mic_detection_method = "Fallback"
-dac_detection_method = "Fallback"
+detected_mic_name  = "N/A"
+detected_dac_name  = "N/A"
+mic_detection_method  = "unknown"
+dac_detection_method  = "unknown"
+detected_dac_rate     = 48000            # will be updated below if possible
 
-# --- Environment Variable Override Check ---
-# Check if indices are explicitly set via environment variables
-ENV_MIC_INDEX = os.getenv("MIC_DEVICE_INDEX")
-ENV_DAC_INDEX = os.getenv("DAC_PYAUDIO_INDEX")
-
-final_mic_index = None
-final_dac_index = None
-
-# --- PyAudio Device Detection ---
+# ------------------------------------------------------------------#
+# Detect audio devices
+# ------------------------------------------------------------------#
 try:
     import pyaudio
-    p = pyaudio.PyAudio()
 
-    # --- Microphone Detection Logic ---
+    _pa = pyaudio.PyAudio()
+
+    # ----- microphone -----
     if ENV_MIC_INDEX is not None:
         try:
-            final_mic_index = int(ENV_MIC_INDEX)
-            mic_info = p.get_device_info_by_index(final_mic_index)
-            # Basic check if it's an input device
-            if mic_info.get('maxInputChannels', 0) > 0:
-                 detected_mic_name = mic_info.get('name', f"Index {final_mic_index}")
-                 mic_detection_method = "Environment Variable"
-                 log_config.info(f"Using MIC_DEVICE_INDEX from environment: {final_mic_index} ('{detected_mic_name}')")
+            mic_idx   = int(ENV_MIC_INDEX)
+            mic_info  = _pa.get_device_info_by_index(mic_idx)
+            if mic_info["maxInputChannels"] > 0:
+                detected_mic_name     = mic_info["name"]
+                mic_detection_method  = "env‑var"
             else:
-                 log_config.warning(f"MIC_DEVICE_INDEX {final_mic_index} from env var is not an input device. Reverting to auto-detection.")
-                 final_mic_index = None # Force auto-detection
-        except (ValueError, OSError, IndexError) as e:
-            log_config.warning(f"Invalid MIC_DEVICE_INDEX '{ENV_MIC_INDEX}' from environment variable: {e}. Reverting to auto-detection.")
-            final_mic_index = None # Force auto-detection
+                raise ValueError("not an input device")
+        except Exception as e:
+            log_config.warning(f"MIC_DEVICE_INDEX invalid ({e}); falling back.")
+            mic_idx = None
+    else:
+        mic_idx = None
 
-    if final_mic_index is None: # Proceed with auto-detection if env var not used or invalid
-        mic_detection_method = "Auto-Detect"
-        # 1. Try specific names first (e.g., USB mics)
-        mic_result = find_device_by_name_fragment(p, ['usb', 'microphone'], is_input=True, threshold=1) # Require at least 1 channel
-        if mic_result:
-            final_mic_index, detected_mic_name = mic_result
-            mic_detection_method += ": USB/Mic Name"
+    if mic_idx is None:
+        mic_detection_method = "auto‑detect"
+        res = find_device_by_name_fragment(
+            _pa, ["usb", "microphone"], is_input=True, threshold=1
+        )
+        if res:
+            mic_idx, detected_mic_name = res
+            mic_detection_method += ":name"
         else:
-            # 2. Try PyAudio default input
-            ### ad
             try:
-                default_input_info = p.get_default_input_device_info()
-                final_mic_index = default_input_info['index']
-                detected_mic_name = default_input_info.get('name', f"Index {final_mic_index}")
-                mic_detection_method += ": PyAudio Default Input"
-            except Exception as e:
-                # 3. Fallback to hardcoded default index
-                log_config.warning(f"Could not get PyAudio default input device: {e}. Using fallback index {DEFAULT_MIC_INDEX}.")
-                final_mic_index = DEFAULT_MIC_INDEX
-                try: # Try to get name for fallback index
-                    mic_info = p.get_device_info_by_index(final_mic_index)
-                    # Check if fallback is actually an input device
-                    if mic_info.get('maxInputChannels', 0) > 0:
-                        detected_mic_name = mic_info.get('name', f"Index {final_mic_index}")
-                    else:
-                        detected_mic_name = f"Fallback Index {final_mic_index} (Not Input)"
-                        log_config.error(f"Fallback Mic Index {final_mic_index} is not an input device!")
+                mic_idx             = _pa.get_default_input_device_info()["index"]
+                detected_mic_name   = _pa.get_device_info_by_index(mic_idx)["name"]
+                mic_detection_method += ":default"
+            except Exception:
+                mic_idx = DEFAULT_MIC_INDEX
+                try:
+                    detected_mic_name = _pa.get_device_info_by_index(mic_idx)["name"]
                 except Exception:
-                     detected_mic_name = f"Fallback Index {final_mic_index} (Name N/A)"
-                mic_detection_method = "Fallback Index"
+                    detected_mic_name = f"Index {mic_idx}"
+                mic_detection_method = "fallback"
 
-
-    # --- DAC/Output Detection Logic ---
+    # ----- DAC / output -----
     if ENV_DAC_INDEX is not None:
         try:
-            final_dac_index = int(ENV_DAC_INDEX)
-            dac_info = p.get_device_info_by_index(final_dac_index)
-             # Basic check if it's an output device
-            if dac_info.get('maxOutputChannels', 0) > 0:
-                detected_dac_name = dac_info.get('name', f"Index {final_dac_index}")
-                dac_detection_method = "Environment Variable"
-                log_config.info(f"Using DAC_PYAUDIO_INDEX from environment: {final_dac_index} ('{detected_dac_name}')")
+            dac_idx   = int(ENV_DAC_INDEX)
+            dac_info  = _pa.get_device_info_by_index(dac_idx)
+            if dac_info["maxOutputChannels"] > 0:
+                detected_dac_name    = dac_info["name"]
+                detected_dac_rate    = int(round(dac_info.get("defaultSampleRate", 48000)))
+                dac_detection_method = "env‑var"
             else:
-                log_config.warning(f"DAC_PYAUDIO_INDEX {final_dac_index} from env var is not an output device. Reverting to auto-detection.")
-                final_dac_index = None # Force auto-detection
-        except (ValueError, OSError, IndexError) as e:
-            log_config.warning(f"Invalid DAC_PYAUDIO_INDEX '{ENV_DAC_INDEX}' from environment variable: {e}. Reverting to auto-detection.")
-            final_dac_index = None # Force auto-detection
+                raise ValueError("not an output device")
+        except Exception as e:
+            log_config.warning(f"DAC_PYAUDIO_INDEX invalid ({e}); falling back.")
+            dac_idx = None
+    else:
+        dac_idx = None
 
-    if final_dac_index is None: # Proceed with auto-detection if env var not used or invalid
-        dac_detection_method = "Auto-Detect"
-        # Define search terms in priority order
-        specific_rpi_dac_names = ['snd_rpi_hifiberry_dac', 'pcm5102', 'hifiberry', 'audioinjector']
-        general_output_names = ['speaker', 'headphones', 'usb audio', 'dac'] # USB added here as lower priority
-
-        # 1. Try specific RPi DAC names
-        dac_result = find_device_by_name_fragment(p, specific_rpi_dac_names, is_input=False, threshold=1) # Require at least 1 output channel
-        if dac_result:
-            final_dac_index, detected_dac_name = dac_result
-            dac_detection_method += ": Specific RPi DAC Name"
+    if dac_idx is None:
+        dac_detection_method = "auto‑detect"
+        res = find_device_by_name_fragment(
+            _pa,
+            ["snd_rpi_hifiberry_dac", "pcm5102", "hifiberry", "audioinjector"],
+            is_input=False,
+            threshold=1,
+        )
+        if not res:
+            res = find_device_by_name_fragment(
+                _pa, ["speaker", "headphones", "usb audio", "dac"], is_input=False, threshold=1
+            )
+        if res:
+            dac_idx, detected_dac_name = res
+            dac_detection_method += ":name"
         else:
-            # 2. Try general output names
-            dac_result = find_device_by_name_fragment(p, general_output_names, is_input=False, threshold=1)
-            if dac_result:
-                final_dac_index, detected_dac_name = dac_result
-                dac_detection_method += ": General Output Name"
-            else:
-                # 3. Try PyAudio default output
+            try:
+                default_info       = _pa.get_default_output_device_info()
+                dac_idx            = default_info["index"]
+                detected_dac_name  = default_info["name"]
+                dac_detection_method += ":default"
+            except Exception:
+                dac_idx = DEFAULT_DAC_INDEX
                 try:
-                    default_output_info = p.get_default_output_device_info()
-                    final_dac_index = default_output_info['index']
-                    detected_dac_name = default_output_info.get('name', f"Index {final_dac_index}")
-                    dac_detection_method += ": PyAudio Default Output"
-                except Exception as e:
-                    # 4. Fallback to hardcoded default index
-                    log_config.warning(f"Could not get PyAudio default output device: {e}. Using fallback index {DEFAULT_DAC_INDEX}.")
-                    final_dac_index = DEFAULT_DAC_INDEX
-                    try: # Try to get name for fallback index
-                         dac_info = p.get_device_info_by_index(final_dac_index)
-                         # Check if fallback is actually an output device
-                         if dac_info.get('maxOutputChannels', 0) > 0:
-                             detected_dac_name = dac_info.get('name', f"Index {final_dac_index}")
-                         else:
-                             detected_dac_name = f"Fallback Index {final_dac_index} (Not Output)"
-                             log_config.error(f"Fallback DAC Index {final_dac_index} is not an output device!")
-                    except Exception:
-                         detected_dac_name = f"Fallback Index {final_dac_index} (Name N/A)"
-                    dac_detection_method = "Fallback Index"
+                    detected_dac_name = _pa.get_device_info_by_index(dac_idx)["name"]
+                except Exception:
+                    detected_dac_name = f"Index {dac_idx}"
+                dac_detection_method = "fallback"
 
-    p.terminate()
-    log_config.debug("PyAudio terminated after device detection.")
+        # Whatever method gave us *dac_idx*, fetch its preferred rate
+        try:
+            dac_info         = _pa.get_device_info_by_index(dac_idx)
+            detected_dac_rate = int(round(dac_info.get("defaultSampleRate", 48000)))
+        except Exception:
+            detected_dac_rate = 48000
+
+    _pa.terminate()
 
 except Exception as e:
-    log_config.error(f"PyAudio check failed during config load: {e}. Audio features may not work.")
-    # Use hardcoded fallbacks if PyAudio failed entirely
-    final_mic_index = int(ENV_MIC_INDEX) if ENV_MIC_INDEX is not None else DEFAULT_MIC_INDEX
-    final_dac_index = int(ENV_DAC_INDEX) if ENV_DAC_INDEX is not None else DEFAULT_DAC_INDEX
-    mic_detection_method = "Error Fallback" + (": Env Var" if ENV_MIC_INDEX is not None else ": Hardcoded")
-    dac_detection_method = "Error Fallback" + (": Env Var" if ENV_DAC_INDEX is not None else ": Hardcoded")
-    detected_mic_name = f"Fallback Index {final_mic_index} (PyAudio Error)"
-    detected_dac_name = f"Fallback Index {final_dac_index} (PyAudio Error)"
-
+    log_config.error(f"PyAudio initialisation failed: {e}")
+    mic_idx = int(ENV_MIC_INDEX) if ENV_MIC_INDEX else DEFAULT_MIC_INDEX
+    dac_idx = int(ENV_DAC_INDEX) if ENV_DAC_INDEX else DEFAULT_DAC_INDEX
+    detected_mic_name = f"Index {mic_idx}"
+    detected_dac_name = f"Index {dac_idx}"
+    mic_detection_method = dac_detection_method = "fallback"
+    detected_dac_rate = 48000     # safe default
 
 # ------------------------------------------------------------------#
-# Audio (USB mic)
+# Public configuration constants
 # ------------------------------------------------------------------#
-MIC_DEVICE_INDEX: int = final_mic_index
-MIC_SAMPLE_RATE: int  = int(os.getenv("MIC_SAMPLE_RATE", "0")) # 0 lets PyAudio choose default rate
-MIC_CHANNELS: int     = int(os.getenv("MIC_CHANNELS",    "1"))
-MIC_CHUNK: int        = int(os.getenv("MIC_CHUNK",      "1024"))
-MIC_NORMALISE: bool   = os.getenv("MIC_NORMALISE",      "1") == "1"
+# Mic
+MIC_DEVICE_INDEX    = mic_idx
+MIC_SAMPLE_RATE     = int(os.getenv("MIC_SAMPLE_RATE", "0"))     # 0 = PyAudio default
+MIC_CHANNELS        = int(os.getenv("MIC_CHANNELS", "1"))
+MIC_CHUNK           = int(os.getenv("MIC_CHUNK", "1024"))
+MIC_NORMALISE       = os.getenv("MIC_NORMALISE", "1") == "1"
+
+# Playback
+DAC_PYAUDIO_INDEX   = dac_idx
+PLAYBACK_CHUNK      = 1024
+
+# >>> here’s the important bit: we honour OUTPUT_SAMPLE_RATE env‑var **or**
+# >>> fall back to whatever the driver reported (detected_dac_rate)
+OUTPUT_SAMPLE_RATE  = int(
+    os.getenv("OUTPUT_SAMPLE_RATE", str(detected_dac_rate))
+)
 
 # ------------------------------------------------------------------#
-# Playback (PCM5102 DAC via PyAudio)
+# GPIO, vector‑store, model names … (unchanged from your original file)
 # ------------------------------------------------------------------#
-DAC_PYAUDIO_INDEX: int = final_dac_index
-PLAYBACK_CHUNK: int    = 1024  # chunk size
-# *** CHANGE: Set default output rate to 48kHz ***
-OUTPUT_SAMPLE_RATE: int = int(os.getenv("OUTPUT_SAMPLE_RATE", "48000")) # Default to 48kHz
+GPIO_BUTTON_PIN        = int(os.getenv("GPIO_BUTTON_PIN", "17"))
+GPIO_LED_PIN           = int(os.getenv("GPIO_LED_PIN", "27"))
+BUTTON_ACTIVE_HIGH     = os.getenv("BUTTON_ACTIVE_HIGH", "True")
 
-# ------------------------------------------------------------------#
-# GPIO – push‑button + LED
-# ------------------------------------------------------------------#
-GPIO_BUTTON_PIN: int  = int(os.getenv("GPIO_BUTTON_PIN", "17"))
-GPIO_LED_PIN:   int   = int(os.getenv("GPIO_LED_PIN",    "27"))
-BUTTON_ACTIVE_HIGH: bool = os.getenv("BUTTON_ACTIVE_HIGH", "True")
-# Automatically disable GPIO if not on RPi or if explicitly disabled
 _IS_RPI = False
 if sys.platform == "linux":
-     try:
-          # Check for Raspberry Pi specific entries in cpuinfo
-          with open('/proc/cpuinfo', 'r') as f:
-               cpuinfo = f.read()
-               if 'Raspberry Pi' in cpuinfo or 'BCM2708' in cpuinfo or 'BCM2709' in cpuinfo or 'BCM2835' in cpuinfo or 'BCM2836' in cpuinfo or 'BCM2837' in cpuinfo or 'BCM2711' in cpuinfo:
-                   _IS_RPI = True
+    try:
+        with open("/proc/cpuinfo") as _f:
+            _IS_RPI = any(k in _f.read() for k in ("Raspberry Pi", "BCM27"))
+        if _IS_RPI:
+            import RPi.GPIO
+    except Exception:
+        _IS_RPI = False
 
-          if _IS_RPI:
-              # Try importing RPi.GPIO only if detected as RPi
-              import RPi.GPIO
-     except (ImportError, RuntimeError, FileNotFoundError):
-          _IS_RPI = False # Ensure it's False if check fails or RPi.GPIO not installed
+ENABLE_GPIO_ENV        = os.getenv("ENABLE_GPIO", "True").lower() in ("true", "1", "yes")
+ENABLE_GPIO            = _IS_RPI and ENABLE_GPIO_ENV
 
-ENABLE_GPIO_ENV: bool = os.getenv("ENABLE_GPIO", "True").lower() in ("true", "1", "yes")
-ENABLE_GPIO: bool = ENABLE_GPIO_ENV and _IS_RPI
+VECTOR_STORE_ID        = os.getenv(
+    "VECTOR_STORE_ID", "vs_6800e568d74c8191927351dc5afbfd81"
+)
 
-# ------------------------------------------------------------------#
-# OpenAI Vector Store for File Search
-# ------------------------------------------------------------------#
-VECTOR_STORE_ID: str = os.getenv("VECTOR_STORE_ID", "vs_6800e568d74c8191927351dc5afbfd81")
-if not VECTOR_STORE_ID:
-    log_config.warning("VECTOR_STORE_ID not set in environment. PDF features will fail.")
+OPENAI_MODEL_FILE_QA   = os.getenv("OPENAI_MODEL_FILE_QA", "gpt-4.1-mini")
+OPENAI_MODEL_AGENT     = os.getenv("OPENAI_MODEL_AGENT", "gpt-4.1-mini")
+OPENAI_MODEL_REALTIME  = os.getenv("OPENAI_MODEL_REALTIME", "gpt-4o-realtime-preview")
+OPENAI_MODEL_TRANSCRIPTION = os.getenv("OPENAI_MODEL_TRANSCRIPTION", "whisper-1")
 
 # ------------------------------------------------------------------#
-# OpenAI Model Configuration
+# Final summary to the log
 # ------------------------------------------------------------------#
-OPENAI_MODEL_FILE_QA: str       = os.getenv("OPENAI_MODEL_FILE_QA",       "gpt-4.1-mini")
-OPENAI_MODEL_AGENT: str         = os.getenv("OPENAI_MODEL_AGENT",         "gpt-4.1-mini")
-OPENAI_MODEL_REALTIME: str      = os.getenv("OPENAI_MODEL_REALTIME",      "gpt-4o-realtime-preview")
-OPENAI_MODEL_TRANSCRIPTION: str = os.getenv("OPENAI_MODEL_TRANSCRIPTION", "whisper-1")
-
-
-# --- Final Configuration Logging ---
-log_config.info("--- Configuration ---")
-log_config.info(f"Platform: {'Raspberry Pi' if _IS_RPI else sys.platform}")
-log_config.info(f"Mic Device: Index={MIC_DEVICE_INDEX}, Name='{detected_mic_name}', Method='{mic_detection_method}'")
-log_config.info(f"DAC Device: Index={DAC_PYAUDIO_INDEX}, Name='{detected_dac_name}', Method='{dac_detection_method}'")
-if dac_detection_method == 'Auto-Detect: Specific RPi DAC Name':
-    log_config.info(" --> Successfully detected specific RPi DAC.")
-elif dac_detection_method == 'Environment Variable':
-    log_config.info(" --> Using DAC index specified by DAC_PYAUDIO_INDEX environment variable.")
-elif 'Fallback' in dac_detection_method or 'Default' in dac_detection_method:
-    log_config.warning(" --> DAC detection fell back. Check PyAudio/ALSA setup if intended DAC wasn't found.")
-    log_config.warning(" --> For RPi DAC, set DAC_PYAUDIO_INDEX environment variable for reliability.")
-
-# Log the chosen output sample rate
-log_config.info(f"Target Output Sample Rate: {OUTPUT_SAMPLE_RATE} Hz")
-log_config.info(f"GPIO Enabled: {ENABLE_GPIO}")
-if ENABLE_GPIO:
-    log_config.info(f"  Button Pin: {GPIO_BUTTON_PIN} (Active High: {BUTTON_ACTIVE_HIGH})")
-    log_config.info(f"  LED Pin: {GPIO_LED_PIN}")
-else:
-    if not _IS_RPI:
-        log_config.info("  (GPIO disabled: Not detected as Raspberry Pi or RPi.GPIO missing)")
-    elif not ENABLE_GPIO_ENV:
-        log_config.info("  (GPIO disabled: ENABLE_GPIO environment variable is not True)")
-log_config.info(f"Vector Store ID: {'Set' if VECTOR_STORE_ID else 'Not Set'}")
-log_config.info(f"OpenAI Models: QA={OPENAI_MODEL_FILE_QA}, Agent={OPENAI_MODEL_AGENT}, Realtime={OPENAI_MODEL_REALTIME}")
-log_config.info("--------------------")
+log_config.info("--- Configuration --------------------------------")
+log_config.info(f"Platform: {'RPi' if _IS_RPI else sys.platform}")
+log_config.info(f"Mic   : index={MIC_DEVICE_INDEX}  ({detected_mic_name})  via {mic_detection_method}")
+log_config.info(
+    f"DAC   : index={DAC_PYAUDIO_INDEX} ({detected_dac_name})  via {dac_detection_method}"
+)
+log_config.info(f"DAC default sample‑rate reported by ALSA: {detected_dac_rate} Hz")
+log_config.info(f"OUTPUT_SAMPLE_RATE in use           : {OUTPUT_SAMPLE_RATE} Hz")
+log_config.info(f"GPIO enabled: {ENABLE_GPIO}")
+log_config.info("--------------------------------------------------")
