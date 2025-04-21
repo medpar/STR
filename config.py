@@ -110,6 +110,7 @@ try:
             mic_detection_method += ": USB/Mic Name"
         else:
             # 2. Try PyAudio default input
+            ### ad
             try:
                 default_input_info = p.get_default_input_device_info()
                 final_mic_index = default_input_info['index']
