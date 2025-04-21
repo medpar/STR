@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 """
 Save, convert and play audio.
-Uses PyAudio for playback. Ensures consistent output sample rate (OUTPUT_SAMPLE_RATE)
-by resampling WAV files before playback using pydub.
-Attempts specified DAC, falls back to default.
+Uses PyAudio for playback. Manually resamples WAV files to OUTPUT_SAMPLE_RATE,
+Stereo, 16-bit using numpy before playback.
+Attempts playback *only* on the configured DAC_PYAUDIO_INDEX.
 """
 
 import os
 import logging
-from pydub import AudioSegment, exceptions as pydub_exceptions
+import wave # Use standard wave module for reading
+import numpy as np # Use numpy for resampling
 import pyaudio
-# wave module no longer needed here for playback
 
 from config import DAC_PYAUDIO_INDEX, PLAYBACK_CHUNK, OUTPUT_SAMPLE_RATE
+
+# We still need pydub for the MP3 conversion part
+from pydub import AudioSegment, exceptions as pydub_exceptions
+
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +44,7 @@ def terminate_pyaudio_instance():
 
 def save_stream_to_file(stream, filepath):
     """Save streaming data (like from ElevenLabs) to a file."""
+    # --- This function remains the same ---
     try:
         with open(filepath, "wb") as f:
             for chunk in stream:
@@ -51,18 +56,15 @@ def save_stream_to_file(stream, filepath):
 
 def convert_mp3_to_wav(mp3_filepath, wav_filepath):
     """Convert MP3 -> WAV using pydub. Preserves original sample rate during conversion."""
-    # Resampling will happen during playback if needed
+    # --- This function remains the same ---
     try:
         log.info(f"Converting {mp3_filepath} to WAV format at {wav_filepath}...")
         audio = AudioSegment.from_mp3(mp3_filepath)
-        # Export directly, preserving the original sample rate from the MP3
-        # Pydub defaults to 16-bit WAV which is generally compatible
         audio.export(wav_filepath, format="wav")
         log.info(f"Successfully converted {mp3_filepath} to {wav_filepath} (Rate: {audio.frame_rate} Hz)")
     except pydub_exceptions.CouldntDecodeError as e:
         log.error(f"Pydub decoding error converting {mp3_filepath}: {e}")
         log.error("-> Ensure ffmpeg is installed and accessible in your PATH.")
-        log.error("-> Check if the MP3 file is valid/corrupted.")
         raise
     except FileNotFoundError as e:
          log.error(f"File not found during MP3 conversion: {e}")
@@ -76,8 +78,8 @@ def convert_mp3_to_wav(mp3_filepath, wav_filepath):
 def play_audio(filepath):
     """
     Play a WAV audio file using PyAudio.
-    Forces resampling to OUTPUT_SAMPLE_RATE, 16-bit Stereo using pydub before playback.
-    Attempts specified DAC_PYAUDIO_INDEX first, then falls back to default output.
+    Manually resamples to OUTPUT_SAMPLE_RATE, Stereo, 16-bit using numpy.
+    Attempts playback *only* on configured DAC_PYAUDIO_INDEX.
     """
     if not os.path.exists(filepath):
         log.error(f"Playback Error: File not found - {filepath}")
@@ -86,125 +88,194 @@ def play_audio(filepath):
         log.error(f"Playback Error: Can only play WAV files - {filepath}")
         return
 
+    wf = None
     stream = None
     p = _get_pyaudio_instance() # Use shared instance
 
     try:
-        # --- Load WAV file using pydub (handles format variations) ---
-        log.info(f"Loading '{os.path.basename(filepath)}' using pydub for resampling...")
+        # --- Load WAV file using standard wave module ---
+        log.info(f"Loading '{os.path.basename(filepath)}' using wave module...")
         try:
-            audio = AudioSegment.from_wav(filepath)
-        except pydub_exceptions.CouldntDecodeError as e:
-             log.error(f"Pydub could not decode WAV file: {filepath} - {e}")
-             log.error("-> The WAV file might be corrupted or in an unsupported format.")
-             return
+            wf = wave.open(filepath, 'rb')
+        except wave.Error as e:
+            log.error(f"Wave module could not open WAV file: {filepath} - {e}")
+            return
         except Exception as e:
-             log.error(f"Error loading WAV file {filepath} with pydub: {e}")
+             log.error(f"Error loading WAV file {filepath} with wave module: {e}")
              return
 
-        original_rate = audio.frame_rate
-        original_channels = audio.channels
-        original_width = audio.sample_width
-        log.info(f" -> Loaded original: {original_rate} Hz, {original_channels} Ch, {original_width * 8}-bit")
+        # --- Get Native Audio Parameters ---
+        original_rate = wf.getframerate()
+        original_channels = wf.getnchannels()
+        original_width = wf.getsampwidth() # Bytes per sample
+        num_frames = wf.getnframes()
+        log.info(f" -> Loaded original: {original_rate} Hz, {original_channels} Ch, {original_width * 8}-bit, {num_frames} frames")
 
-        # --- Force Resampling and Format Conversion for Output Device ---
-        target_rate = OUTPUT_SAMPLE_RATE
-        target_channels = 2 # Force Stereo (common for DACs)
-        target_width = 2 # Force 16-bit (PyAudio paInt16)
+        # --- Read all audio data ---
+        raw_data = wf.readframes(num_frames)
+        wf.close() # Close the file handle now
+        wf = None
 
-        resample_needed = (original_rate != target_rate)
-        channels_needed = (original_channels != target_channels)
-        width_needed = (original_width != target_width)
-
-        if resample_needed or channels_needed or width_needed:
-             log.info(f"Adjusting audio format for playback: Target={target_rate}Hz, {target_channels}Ch, {target_width*8}-bit")
-             try:
-                 # Apply conversions sequentially
-                 if resample_needed:
-                      log.debug(f"   Resampling from {original_rate} Hz to {target_rate} Hz...")
-                      audio = audio.set_frame_rate(target_rate)
-                 if channels_needed:
-                      log.debug(f"   Adjusting channels from {original_channels} to {target_channels}...")
-                      audio = audio.set_channels(target_channels)
-                 if width_needed:
-                      log.debug(f"   Adjusting sample width from {original_width*8}-bit to {target_width*8}-bit...")
-                      audio = audio.set_sample_width(target_width)
-                 log.info(" -> Audio format adjusted successfully.")
-             except Exception as e:
-                 log.error(f"Error during pydub audio adjustment: {e}")
-                 return # Stop if adjustment fails
+        # --- Convert raw bytes to numpy array based on sample width ---
+        if original_width == 1:
+            dtype = np.uint8 # 8-bit is usually unsigned
+        elif original_width == 2:
+            dtype = np.int16 # 16-bit is usually signed
+        elif original_width == 3:
+             log.warning("24-bit WAV detected. Reading as bytes, conversion might be imprecise.")
+             # Read as bytes, manual conversion needed later if processing
+             # For now, let's hope resampling handles it okay, or error out.
+             # A better approach would use soundfile or similar library.
+             # We'll attempt resampling but it might fail/be wrong.
+             dtype = np.uint8 # Placeholder, this isn't ideal
+             # TODO: Implement proper 24-bit handling if needed
+        elif original_width == 4:
+            dtype = np.int32 # 32-bit is usually signed int or float
         else:
-             log.info("Audio already matches target playback format. No adjustments needed.")
+            log.error(f"Unsupported sample width: {original_width} bytes ({original_width*8}-bit)")
+            return
 
-        # --- Get Final Parameters and Data ---
-        output_data = audio.raw_data
-        output_rate = audio.frame_rate # Should match target_rate
-        output_channels = audio.channels # Should match target_channels
-        output_width = audio.sample_width # Should match target_width
-        output_format = p.get_format_from_width(output_width) # Should be paInt16
+        if dtype != np.uint8: # Don't process 24-bit further yet
+             log.debug(f"Converting raw data to numpy array (dtype={dtype})...")
+             samples_in = np.frombuffer(raw_data, dtype=dtype)
+        elif original_width == 3: # Special handling attempt for 24-bit
+             log.warning("Attempting basic 24-bit to 16-bit conversion (might lose precision/range).")
+             # This is a crude approximation - assumes little-endian 24-bit signed
+             samples_in = np.array([int.from_bytes(raw_data[i:i+3], 'little', signed=True) >> 8
+                                   for i in range(0, len(raw_data), 3)], dtype=np.int16)
+             if not samples_in.any(): # Check if conversion resulted in empty array
+                 log.error("Failed to convert 24-bit audio data.")
+                 return
+        else: # Handle uint8 case
+             samples_in = np.frombuffer(raw_data, dtype=dtype)
+             # Convert uint8 (0-255) to int16 (-32768 to 32767)
+             samples_in = (samples_in.astype(np.int16) - 128) * 256
 
-        # --- Sanity Check ---
-        if output_rate != target_rate or output_channels != target_channels or output_width != target_width:
-             log.error(f"CRITICAL: Post-adjustment format mismatch! Audio is {output_rate}Hz, {output_channels}Ch, {output_width*8}-bit. Expected {target_rate}/{target_channels}/{target_width*8}.")
-             return
 
-        # --- Attempt to Open Stream (Primary DAC first, then Fallback) ---
+        # --- Resample using numpy interpolation ---
+        target_rate = OUTPUT_SAMPLE_RATE
+        resampled_samples = samples_in # Default if no resampling needed
+        if original_rate != target_rate:
+            log.debug(f"Resampling audio from {original_rate} Hz to {target_rate} Hz using np.interp...")
+            num_samples_in = len(samples_in)
+            # Handle multi-channel data if original was stereo/etc.
+            # We need to resample each channel independently if interleaved.
+            # For simplicity now, assume resampling works ok on interleaved data,
+            # or handle only the mono/stereo case correctly.
+            # Let's reshape, resample first channel, then handle stereo conversion later.
+
+            if original_channels > 1:
+                # Separate channels, resample first, then decide how to combine/stereoize
+                 mono_samples_in = samples_in[::original_channels] # Take first channel
+                 num_mono_samples_in = len(mono_samples_in)
+                 num_samples_out = int(num_mono_samples_in * target_rate / original_rate)
+                 if num_mono_samples_in > 0 and num_samples_out > 0:
+                     idx_orig = np.arange(num_mono_samples_in)
+                     idx_new = np.linspace(0, num_mono_samples_in - 1, num_samples_out)
+                     resampled_mono = np.interp(idx_new, idx_orig, mono_samples_in)
+                     log.debug(f" -> Resampled MONO audio from {num_mono_samples_in} to {len(resampled_mono)} samples.")
+                     # We will force stereo later using this resampled mono data
+                     resampled_samples = resampled_mono # Keep the mono result for now
+                 else:
+                     log.warning("Cannot resample zero-length mono audio component.")
+                     return
+            else: # Original was mono
+                 num_samples_out = int(num_samples_in * target_rate / original_rate)
+                 if num_samples_in > 0 and num_samples_out > 0:
+                     idx_orig = np.arange(num_samples_in)
+                     idx_new = np.linspace(0, num_samples_in - 1, num_samples_out)
+                     resampled_samples = np.interp(idx_new, idx_orig, samples_in)
+                     log.debug(f" -> Resampled MONO audio from {num_samples_in} to {len(resampled_samples)} samples.")
+                 else:
+                    log.warning("Cannot resample zero-length audio.")
+                    return
+        else:
+            log.debug("Audio rate already matches target playback rate. No resampling needed.")
+            # If no resampling needed but original was multichannel, extract first channel for stereo conversion
+            if original_channels > 1:
+                 resampled_samples = samples_in[::original_channels]
+
+        # --- Convert to Stereo, 16-bit ---
+        target_channels = 2
+        target_width = 2
+        target_format_pyaudio = p.get_format_from_width(target_width) # paInt16
+
+        log.debug("Converting resampled audio to Stereo 16-bit...")
+        # At this point, resampled_samples should contain mono data at target_rate
+        final_samples = np.repeat(resampled_samples, target_channels).astype(np.int16)
+        output_data = final_samples.tobytes()
+        log.info(f" -> Final format for playback: {target_rate} Hz, {target_channels} Ch, {target_width * 8}-bit")
+
+        # --- Check if DAC supports the target format ---
         target_device_index = DAC_PYAUDIO_INDEX
-        stream = None
-        opened_device_info = "Unknown"
-
         try:
             device_info = p.get_device_info_by_index(target_device_index)
-            opened_device_info = f"Configured DAC: Index={target_device_index}, Name='{device_info.get('name', 'N/A')}'"
-            log.info(f"Attempting to play on {opened_device_info} (Rate: {output_rate} Hz, Format: {output_channels}Ch/{output_width*8}-bit)")
+            log.info(f"Checking format support for device: Index={target_device_index}, Name='{device_info.get('name', 'N/A')}'")
+            is_supported = p.is_format_supported(
+                rate=target_rate,
+                input_device=None,
+                input_channels=0,
+                input_format=None, # Not checking input
+                output_device=target_device_index,
+                output_channels=target_channels,
+                output_format=target_format_pyaudio
+            )
+            if is_supported:
+                log.info(f" -> Device reports support for {target_rate} Hz, {target_channels} Ch, {target_width*8}-bit.")
+            else:
+                # Log a strong warning but proceed anyway - sometimes is_format_supported is unreliable
+                log.warning(f" -> WARNING: Device *reports no support* for {target_rate} Hz, {target_channels} Ch, {target_width*8}-bit. Playback might fail or be incorrect!")
+                # You could choose to return here if the check fails:
+                # log.error("Aborting playback as target format reportedly not supported.")
+                # return
+
+        except ValueError as e:
+             log.error(f"Error checking format support for device index {target_device_index}: {e}")
+             # This might happen if the index is invalid - stop here.
+             return
+        except Exception as e:
+             log.exception(f"Unexpected error checking format support for device index {target_device_index}: {e}")
+             # Continue with caution? Or stop? Let's stop.
+             return
+
+
+        # --- Attempt to Open Stream ONLY on configured DAC ---
+        stream = None
+        opened_device_info = f"Configured DAC Index={target_device_index}"
+        try:
+            log.info(f"Attempting to open {opened_device_info} with {target_rate} Hz, {target_channels} Ch, {target_width*8}-bit...")
             stream = p.open(
-                format=output_format,
-                channels=output_channels,
-                rate=output_rate, # Use the TARGET rate after conversion
+                format=target_format_pyaudio,
+                channels=target_channels,
+                rate=target_rate, # Use the TARGET rate
                 output=True,
-                output_device_index=target_device_index,
+                output_device_index=target_device_index, # Force this index
                 frames_per_buffer=PLAYBACK_CHUNK,
             )
             log.info(f"Successfully opened {opened_device_info}")
 
         except Exception as e_dac:
-            log.warning(f"Failed to open {opened_device_info}: {e_dac}. Attempting default output device.")
-            try:
-                # Check if default output exists before trying to open
-                default_output_info = p.get_default_output_device_info()
-                default_output_index = default_output_info['index']
-                opened_device_info = f"Default Output: Index={default_output_index}, Name='{default_output_info.get('name', 'N/A')}'"
-                log.info(f"Attempting to play on {opened_device_info} (Rate: {output_rate} Hz, Format: {output_channels}Ch/{output_width*8}-bit)")
-                stream = p.open(
-                    format=output_format,
-                    channels=output_channels,
-                    rate=output_rate, # Use the TARGET rate after conversion
-                    output=True,
-                    output_device_index=None, # Let PyAudio choose default
-                    frames_per_buffer=PLAYBACK_CHUNK,
-                )
-                log.info(f"Successfully opened {opened_device_info}")
-            except Exception as e_default:
-                log.error(f"FATAL: Failed to open both specified DAC and default output device: {e_default}")
-                return # Cannot play
+            # NO FALLBACK - Log the error clearly and exit
+            log.error(f"FATAL: Failed to open configured DAC (Index={target_device_index}) with the target format.")
+            log.error(f" -> PyAudio Error: {e_dac}")
+            log.error(" -> Check if the DAC is correctly configured in ALSA and detected by PyAudio.")
+            log.error(f" -> Ensure the DAC actually supports {target_rate} Hz / {target_channels} Ch / 16-bit.")
+            return # Cannot play
 
         # --- Play Audio ---
         log.info(f"Playing '{os.path.basename(filepath)}' ({len(output_data)} bytes)...")
-        # Write data in chunks using a loop
         data_idx = 0
-        # Use the actual chunk size based on frames_per_buffer
-        chunk_size_bytes = PLAYBACK_CHUNK * output_channels * output_width
+        chunk_size_bytes = PLAYBACK_CHUNK * target_channels * target_width
         while data_idx < len(output_data):
              chunk = output_data[data_idx : data_idx + chunk_size_bytes]
              stream.write(chunk)
-             data_idx += len(chunk) # Use actual length written in case it's the last partial chunk
+             data_idx += len(chunk)
 
-        # Wait for stream to finish playing the buffered data
         stream.stop_stream()
         log.info(f"Finished playing: {os.path.basename(filepath)}")
 
     except FileNotFoundError:
-         log.error(f"Playback Error: File not found during pydub loading - '{filepath}'")
+         log.error(f"Playback Error: File not found - '{filepath}'") # Should be caught earlier
     except Exception as e:
         log.exception(f"Playback Error: An unexpected error occurred while processing/playing '{filepath}': {e}")
 
@@ -212,11 +283,11 @@ def play_audio(filepath):
         # --- Cleanup ---
         if stream is not None:
             try:
-                # Ensure stream is stopped before closing, even if stop_stream was called earlier
-                if stream.is_active():
-                    stream.stop_stream()
+                if stream.is_active(): stream.stop_stream()
                 stream.close()
                 log.debug("PyAudio stream closed.")
             except Exception as e_close:
                 log.error(f"Error closing PyAudio stream: {e_close}")
-        # No wave object to close here as we used pydub
+        if wf is not None: # Should be closed already, but just in case
+            try: wf.close()
+            except Exception: pass

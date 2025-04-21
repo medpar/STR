@@ -207,7 +207,7 @@ MIC_NORMALISE: bool   = os.getenv("MIC_NORMALISE",      "1") == "1"
 # ------------------------------------------------------------------#
 DAC_PYAUDIO_INDEX: int = final_dac_index
 PLAYBACK_CHUNK: int    = 1024  # chunk size
-OUTPUT_SAMPLE_RATE: int = int(os.getenv("OUTPUT_SAMPLE_RATE", "48000")) # 48kHz often good for RPi DACs
+OUTPUT_SAMPLE_RATE: int = int(os.getenv("OUTPUT_SAMPLE_RATE", "41100")) # 48kHz often good for RPi DACs
 
 # ------------------------------------------------------------------#
 # GPIO – push‑button + LED
@@ -237,7 +237,7 @@ ENABLE_GPIO: bool = ENABLE_GPIO_ENV and _IS_RPI
 # ------------------------------------------------------------------#
 # OpenAI Vector Store for File Search
 # ------------------------------------------------------------------#
-VECTOR_STORE_ID: str = os.getenv("VECTOR_STORE_ID", "")
+VECTOR_STORE_ID: str = os.getenv("VECTOR_STORE_ID", "vs_6800e568d74c8191927351dc5afbfd81")
 if not VECTOR_STORE_ID:
     log_config.warning("VECTOR_STORE_ID not set in environment. PDF features will fail.")
 
