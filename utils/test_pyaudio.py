@@ -20,12 +20,12 @@ import time
 # TODO: Set these values before running!
 
 # 1. Path to the WAV file you want to play
-WAV_FILE_PATH = "audio_files/tts_20250422_004453.wav"  # <<< CHANGE THIS to your actual WAV file path
+WAV_FILE_PATH = "audio_files/tts_20250422_010038.wav"  # <<< CHANGE THIS to your actual WAV file path
 
 
 # 2. Output Device Index (Find this using the list_audio_devices() output below)
 #    Common values for external DACs might be 0, 1, or higher depending on your setup.
-OUTPUT_DEVICE_INDEX = None           # <<< CHANGE THIS to the correct index for your DAC
+OUTPUT_DEVICE_INDEX = 1           # <<< CHANGE THIS to the correct index for your DAC
 
 # 3. Target Sample Rate (Hz) to test
 #    Common rates: 44100, 48000, 96000. Check your DAC's capabilities.
