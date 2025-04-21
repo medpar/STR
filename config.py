@@ -225,7 +225,7 @@ OUTPUT_SAMPLE_RATE: int = int(os.getenv("OUTPUT_SAMPLE_RATE", "44100")) # Defaul
 # ------------------------------------------------------------------#
 GPIO_BUTTON_PIN: int  = int(os.getenv("GPIO_BUTTON_PIN", "17"))
 GPIO_LED_PIN:   int   = int(os.getenv("GPIO_LED_PIN",    "27"))
-BUTTON_ACTIVE_HIGH: bool = os.getenv("BUTTON_ACTIVE_HIGH", "False").lower() in ("true", "1", "yes")
+BUTTON_ACTIVE_HIGH: bool = os.getenv("BUTTON_ACTIVE_HIGH", "True")
 # Automatically disable GPIO if not on RPi or if explicitly disabled
 _IS_RPI = False
 if sys.platform == "linux":
@@ -248,7 +248,7 @@ ENABLE_GPIO: bool = ENABLE_GPIO_ENV and _IS_RPI
 # ------------------------------------------------------------------#
 # OpenAI Vector Store for File Search
 # ------------------------------------------------------------------#
-VECTOR_STORE_ID: str = os.getenv("VECTOR_STORE_ID", "")
+VECTOR_STORE_ID: str = os.getenv("VECTOR_STORE_ID", "vs_6800e568d74c8191927351dc5afbfd81")
 if not VECTOR_STORE_ID:
     log_config.warning("VECTOR_STORE_ID not set in environment. PDF features will fail.")
 
