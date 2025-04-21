@@ -71,73 +71,59 @@ detected_dac_name = "Not detected (Using Fallback)"
 mic_detection_method = "Fallback"
 dac_detection_method = "Fallback"
 
-# --- Platform Detection ---
-_IS_RPI = False
-if sys.platform == "linux":
-     try:
-          # Check for Raspberry Pi specific entries in cpuinfo
-          with open('/proc/cpuinfo', 'r') as f:
-               cpuinfo = f.read()
-               # Broadened check for various BCM chips and model names
-               if any(pi_marker in cpuinfo for pi_marker in ['Raspberry Pi', 'BCM2708', 'BCM2709', 'BCM2835', 'BCM2836', 'BCM2837', 'BCM2711']):
-                   _IS_RPI = True
+# --- Environment Variable Override Check ---
+# Check if indices are explicitly set via environment variables
+ENV_MIC_INDEX = os.getenv("MIC_DEVICE_INDEX")
+ENV_DAC_INDEX = os.getenv("DAC_PYAUDIO_INDEX")
 
-          if _IS_RPI:
-              # Try importing RPi.GPIO only if detected as RPi
-              import RPi.GPIO
-              # Note: Basic import check, full functionality depends on library and permissions.
-     except (ImportError, RuntimeError, FileNotFoundError):
-          _IS_RPI = False # Ensure it's False if check fails or RPi.GPIO not installed
-          log_config.debug("RPi check failed or RPi.GPIO not found.")
-
+final_mic_index = None
+final_dac_index = None
 
 # --- PyAudio Device Detection ---
-# Initialize PyAudio instance only if needed for detection
-p = None
 try:
     import pyaudio
     p = pyaudio.PyAudio()
-
-    # --- Environment Variable Override Check ---
-    ENV_MIC_INDEX = os.getenv("MIC_DEVICE_INDEX")
-    ENV_DAC_INDEX = os.getenv("DAC_PYAUDIO_INDEX")
-
-    final_mic_index = None
-    final_dac_index = None
 
     # --- Microphone Detection Logic ---
     if ENV_MIC_INDEX is not None:
         try:
             final_mic_index = int(ENV_MIC_INDEX)
             mic_info = p.get_device_info_by_index(final_mic_index)
+            # Basic check if it's an input device
             if mic_info.get('maxInputChannels', 0) > 0:
                  detected_mic_name = mic_info.get('name', f"Index {final_mic_index}")
                  mic_detection_method = "Environment Variable"
                  log_config.info(f"Using MIC_DEVICE_INDEX from environment: {final_mic_index} ('{detected_mic_name}')")
             else:
                  log_config.warning(f"MIC_DEVICE_INDEX {final_mic_index} from env var is not an input device. Reverting to auto-detection.")
-                 final_mic_index = None
+                 final_mic_index = None # Force auto-detection
         except (ValueError, OSError, IndexError) as e:
             log_config.warning(f"Invalid MIC_DEVICE_INDEX '{ENV_MIC_INDEX}' from environment variable: {e}. Reverting to auto-detection.")
-            final_mic_index = None
+            final_mic_index = None # Force auto-detection
 
-    if final_mic_index is None: # Auto-detect Mic
+    if final_mic_index is None: # Proceed with auto-detection if env var not used or invalid
         mic_detection_method = "Auto-Detect"
+        # 1. Try specific names first (e.g., USB mics)
         mic_result = find_device_by_name_fragment(p, ['usb', 'microphone'], is_input=True, threshold=0)
         if mic_result:
             final_mic_index, detected_mic_name = mic_result
             mic_detection_method += ": USB/Mic Name"
         else:
+            # 2. Try PyAudio default input
             try:
                 default_input_info = p.get_default_input_device_info()
                 final_mic_index = default_input_info['index']
                 detected_mic_name = default_input_info.get('name', f"Index {final_mic_index}")
                 mic_detection_method += ": PyAudio Default Input"
             except Exception as e:
+                # 3. Fallback to hardcoded default index
                 log_config.warning(f"Could not get PyAudio default input device: {e}. Using fallback index {DEFAULT_MIC_INDEX}.")
                 final_mic_index = DEFAULT_MIC_INDEX
-                try: mic_info = p.get_device_info_by_index(final_mic_index); detected_mic_name = mic_info.get('name', f"Index {final_mic_index}")
-                except Exception: detected_mic_name = f"Fallback Index {final_mic_index} (Name N/A)"
+                try: # Try to get name for fallback index
+                    mic_info = p.get_device_info_by_index(final_mic_index)
+                    detected_mic_name = mic_info.get('name', f"Index {final_mic_index}")
+                except Exception:
+                     detected_mic_name = f"Fallback Index {final_mic_index} (Name N/A)"
                 mic_detection_method = "Fallback Index"
 
 
@@ -146,58 +132,56 @@ try:
         try:
             final_dac_index = int(ENV_DAC_INDEX)
             dac_info = p.get_device_info_by_index(final_dac_index)
+             # Basic check if it's an output device
             if dac_info.get('maxOutputChannels', 0) > 0:
                 detected_dac_name = dac_info.get('name', f"Index {final_dac_index}")
                 dac_detection_method = "Environment Variable"
                 log_config.info(f"Using DAC_PYAUDIO_INDEX from environment: {final_dac_index} ('{detected_dac_name}')")
             else:
                 log_config.warning(f"DAC_PYAUDIO_INDEX {final_dac_index} from env var is not an output device. Reverting to auto-detection.")
-                final_dac_index = None
+                final_dac_index = None # Force auto-detection
         except (ValueError, OSError, IndexError) as e:
             log_config.warning(f"Invalid DAC_PYAUDIO_INDEX '{ENV_DAC_INDEX}' from environment variable: {e}. Reverting to auto-detection.")
-            final_dac_index = None
+            final_dac_index = None # Force auto-detection
 
-    if final_dac_index is None: # Auto-detect DAC
+    if final_dac_index is None: # Proceed with auto-detection if env var not used or invalid
         dac_detection_method = "Auto-Detect"
-        # Define search terms in priority order (Specific DACs first only if on RPi)
-        search_terms = []
-        if _IS_RPI:
-             specific_rpi_dac_names = ['snd_rpi_hifiberry_dac', 'pcm5102', 'hifiberry', 'audioinjector']
-             search_terms.extend(specific_rpi_dac_names)
+        # Define search terms in priority order
+        specific_rpi_dac_names = ['snd_rpi_hifiberry_dac', 'pcm5102', 'hifiberry', 'audioinjector']
+        general_output_names = ['speaker', 'headphones', 'usb audio', 'dac'] # USB added here as lower priority
 
-        general_output_names = ['speaker', 'headphones', 'usb audio', 'dac', 'default'] # Added 'default' as low priority
-        search_terms.extend(general_output_names)
-
-        dac_result = find_device_by_name_fragment(p, search_terms, is_input=False, threshold=1)
+        # 1. Try specific RPi DAC names
+        dac_result = find_device_by_name_fragment(p, specific_rpi_dac_names, is_input=False, threshold=1) # Require at least 1 output channel
         if dac_result:
             final_dac_index, detected_dac_name = dac_result
-            # Refine detection method description
-            if _IS_RPI and any(name in detected_dac_name.lower() for name in specific_rpi_dac_names):
-                 dac_detection_method += ": Specific RPi DAC Name"
+            dac_detection_method += ": Specific RPi DAC Name"
+        else:
+            # 2. Try general output names
+            dac_result = find_device_by_name_fragment(p, general_output_names, is_input=False, threshold=1)
+            if dac_result:
+                final_dac_index, detected_dac_name = dac_result
+                dac_detection_method += ": General Output Name"
             else:
-                 dac_detection_method += ": General Output Name"
-        else: # Fallback to PyAudio default output as last resort
-            try:
-                default_output_info = p.get_default_output_device_info()
-                final_dac_index = default_output_info['index']
-                detected_dac_name = default_output_info.get('name', f"Index {final_dac_index}")
-                dac_detection_method += ": PyAudio Default Output"
-            except Exception as e:
-                log_config.warning(f"Could not get PyAudio default output device: {e}. Using fallback index {DEFAULT_DAC_INDEX}.")
-                final_dac_index = DEFAULT_DAC_INDEX
-                try: dac_info = p.get_device_info_by_index(final_dac_index); detected_dac_name = dac_info.get('name', f"Index {final_dac_index}")
-                except Exception: detected_dac_name = f"Fallback Index {final_dac_index} (Name N/A)"
-                dac_detection_method = "Fallback Index"
+                # 3. Try PyAudio default output
+                try:
+                    default_output_info = p.get_default_output_device_info()
+                    final_dac_index = default_output_info['index']
+                    detected_dac_name = default_output_info.get('name', f"Index {final_dac_index}")
+                    dac_detection_method += ": PyAudio Default Output"
+                except Exception as e:
+                    # 4. Fallback to hardcoded default index
+                    log_config.warning(f"Could not get PyAudio default output device: {e}. Using fallback index {DEFAULT_DAC_INDEX}.")
+                    final_dac_index = DEFAULT_DAC_INDEX
+                    try: # Try to get name for fallback index
+                         dac_info = p.get_device_info_by_index(final_dac_index)
+                         detected_dac_name = dac_info.get('name', f"Index {final_dac_index}")
+                    except Exception:
+                         detected_dac_name = f"Fallback Index {final_dac_index} (Name N/A)"
+                    dac_detection_method = "Fallback Index"
 
-except ImportError:
-    log_config.error("PyAudio library not found. Audio features will not work.")
-    # Use hardcoded fallbacks if PyAudio is missing
-    final_mic_index = int(ENV_MIC_INDEX) if ENV_MIC_INDEX is not None else DEFAULT_MIC_INDEX
-    final_dac_index = int(ENV_DAC_INDEX) if ENV_DAC_INDEX is not None else DEFAULT_DAC_INDEX
-    mic_detection_method = "Error Fallback (PyAudio Missing)" + (": Env Var" if ENV_MIC_INDEX is not None else ": Hardcoded")
-    dac_detection_method = "Error Fallback (PyAudio Missing)" + (": Env Var" if ENV_DAC_INDEX is not None else ": Hardcoded")
-    detected_mic_name = f"Fallback Index {final_mic_index} (PyAudio Error)"
-    detected_dac_name = f"Fallback Index {final_dac_index} (PyAudio Error)"
+    p.terminate()
+    log_config.debug("PyAudio terminated after device detection.")
+
 except Exception as e:
     log_config.error(f"PyAudio check failed during config load: {e}. Audio features may not work.")
     # Use hardcoded fallbacks if PyAudio failed entirely
@@ -207,11 +191,6 @@ except Exception as e:
     dac_detection_method = "Error Fallback" + (": Env Var" if ENV_DAC_INDEX is not None else ": Hardcoded")
     detected_mic_name = f"Fallback Index {final_mic_index} (PyAudio Error)"
     detected_dac_name = f"Fallback Index {final_dac_index} (PyAudio Error)"
-finally:
-    # Terminate PyAudio instance if it was created
-    if p is not None:
-        p.terminate()
-        log_config.debug("PyAudio terminated after device detection.")
 
 
 # ------------------------------------------------------------------#
@@ -224,12 +203,11 @@ MIC_CHUNK: int        = int(os.getenv("MIC_CHUNK",      "1024"))
 MIC_NORMALISE: bool   = os.getenv("MIC_NORMALISE",      "1") == "1"
 
 # ------------------------------------------------------------------#
-# Playback (PCM5102 DAC via PyAudio or Default)
+# Playback (PCM5102 DAC via PyAudio)
 # ------------------------------------------------------------------#
 DAC_PYAUDIO_INDEX: int = final_dac_index
-PLAYBACK_CHUNK: int    = 1024  # chunk size for pyaudio stream write
-# *** CHANGE: Default to 44.1kHz, as 48kHz caused issues ***
-OUTPUT_SAMPLE_RATE: int = int(os.getenv("OUTPUT_SAMPLE_RATE", "44100")) # 44.1kHz standard audio rate
+PLAYBACK_CHUNK: int    = 1024  # chunk size
+OUTPUT_SAMPLE_RATE: int = int(os.getenv("OUTPUT_SAMPLE_RATE", "44100")) # 48kHz often good for RPi DACs
 
 # ------------------------------------------------------------------#
 # GPIO – push‑button + LED
@@ -237,13 +215,29 @@ OUTPUT_SAMPLE_RATE: int = int(os.getenv("OUTPUT_SAMPLE_RATE", "44100")) # 44.1kH
 GPIO_BUTTON_PIN: int  = int(os.getenv("GPIO_BUTTON_PIN", "17"))
 GPIO_LED_PIN:   int   = int(os.getenv("GPIO_LED_PIN",    "27"))
 BUTTON_ACTIVE_HIGH: bool = os.getenv("BUTTON_ACTIVE_HIGH", "False").lower() in ("true", "1", "yes")
+# Automatically disable GPIO if not on RPi or if explicitly disabled
+_IS_RPI = False
+if sys.platform == "linux":
+     try:
+          # Check for Raspberry Pi specific entries in cpuinfo
+          with open('/proc/cpuinfo', 'r') as f:
+               cpuinfo = f.read()
+               if 'Raspberry Pi' in cpuinfo or 'BCM2708' in cpuinfo or 'BCM2709' in cpuinfo or 'BCM2835' in cpuinfo or 'BCM2836' in cpuinfo or 'BCM2837' in cpuinfo or 'BCM2711' in cpuinfo:
+                   _IS_RPI = True
+
+          if _IS_RPI:
+              # Try importing RPi.GPIO only if detected as RPi
+              import RPi.GPIO
+     except (ImportError, RuntimeError, FileNotFoundError):
+          _IS_RPI = False # Ensure it's False if check fails or RPi.GPIO not installed
+
 ENABLE_GPIO_ENV: bool = os.getenv("ENABLE_GPIO", "True").lower() in ("true", "1", "yes")
-ENABLE_GPIO: bool = ENABLE_GPIO_ENV and _IS_RPI # Automatically disable if not RPi or if ENV is false
+ENABLE_GPIO: bool = ENABLE_GPIO_ENV and _IS_RPI
 
 # ------------------------------------------------------------------#
 # OpenAI Vector Store for File Search
 # ------------------------------------------------------------------#
-VECTOR_STORE_ID: str = os.getenv("VECTOR_STORE_ID", "")
+VECTOR_STORE_ID: str = os.getenv("VECTOR_STORE_ID", "vs_6800e568d74c8191927351dc5afbfd81")
 if not VECTOR_STORE_ID:
     log_config.warning("VECTOR_STORE_ID not set in environment. PDF features will fail.")
 
@@ -260,29 +254,25 @@ OPENAI_MODEL_TRANSCRIPTION: str = os.getenv("OPENAI_MODEL_TRANSCRIPTION", "whisp
 log_config.info("--- Configuration ---")
 log_config.info(f"Platform: {'Raspberry Pi' if _IS_RPI else sys.platform}")
 log_config.info(f"Mic Device: Index={MIC_DEVICE_INDEX}, Name='{detected_mic_name}', Method='{mic_detection_method}'")
-log_config.info(f"DAC Device Index (for RPi): {DAC_PYAUDIO_INDEX}, Detected Name='{detected_dac_name}', Method='{dac_detection_method}'")
-# Log target output rate
-log_config.info(f"Target Output Sample Rate: {OUTPUT_SAMPLE_RATE} Hz")
-if _IS_RPI:
-    log_config.info(f" -> On RPi, will attempt playback on Index {DAC_PYAUDIO_INDEX} at {OUTPUT_SAMPLE_RATE} Hz.")
-else:
-    log_config.info(f" -> Not on RPi, will attempt playback on system default output device at {OUTPUT_SAMPLE_RATE} Hz.")
-
-if dac_detection_method == 'Auto-Detect: Specific RPi DAC Name' and _IS_RPI:
+log_config.info(f"DAC Device: Index={DAC_PYAUDIO_INDEX}, Name='{detected_dac_name}', Method='{dac_detection_method}'")
+if dac_detection_method == 'Auto-Detect: Specific RPi DAC Name':
     log_config.info(" --> Successfully detected specific RPi DAC.")
 elif dac_detection_method == 'Environment Variable':
-    log_config.info(f" --> Using DAC index specified by DAC_PYAUDIO_INDEX env var ({DAC_PYAUDIO_INDEX}).")
+    log_config.info(" --> Using DAC index specified by DAC_PYAUDIO_INDEX environment variable.")
 elif 'Fallback' in dac_detection_method or 'Default' in dac_detection_method:
-    log_config.warning(" --> DAC detection fell back or used default. Check PyAudio/ALSA setup if intended DAC wasn't found.")
-    if _IS_RPI: log_config.warning(" --> For specific RPi DAC, try setting DAC_PYAUDIO_INDEX environment variable.")
+    log_config.warning(" --> DAC detection fell back. Check PyAudio/ALSA setup if intended DAC wasn't found.")
+    log_config.warning(" --> For RPi DAC, set DAC_PYAUDIO_INDEX environment variable for reliability.")
 
+log_config.info(f"Output Sample Rate: {OUTPUT_SAMPLE_RATE} Hz")
 log_config.info(f"GPIO Enabled: {ENABLE_GPIO}")
 if ENABLE_GPIO:
     log_config.info(f"  Button Pin: {GPIO_BUTTON_PIN} (Active High: {BUTTON_ACTIVE_HIGH})")
     log_config.info(f"  LED Pin: {GPIO_LED_PIN}")
 else:
-    if not _IS_RPI: log_config.info("  (GPIO disabled: Not detected as Raspberry Pi or RPi.GPIO missing/failed)")
-    elif not ENABLE_GPIO_ENV: log_config.info("  (GPIO disabled: ENABLE_GPIO environment variable is not True)")
+    if not _IS_RPI:
+        log_config.info("  (GPIO disabled: Not detected as Raspberry Pi or RPi.GPIO missing)")
+    elif not ENABLE_GPIO_ENV:
+        log_config.info("  (GPIO disabled: ENABLE_GPIO environment variable is not True)")
 log_config.info(f"Vector Store ID: {'Set' if VECTOR_STORE_ID else 'Not Set'}")
 log_config.info(f"OpenAI Models: QA={OPENAI_MODEL_FILE_QA}, Agent={OPENAI_MODEL_AGENT}, Realtime={OPENAI_MODEL_REALTIME}")
 log_config.info("--------------------")
