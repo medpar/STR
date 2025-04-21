@@ -218,8 +218,8 @@ MIC_NORMALISE: bool   = os.getenv("MIC_NORMALISE",      "1") == "1"
 # ------------------------------------------------------------------#
 DAC_PYAUDIO_INDEX: int = final_dac_index
 PLAYBACK_CHUNK: int    = 1024  # chunk size
-# *** CHANGE: Set default output rate to 44.1kHz ***
-OUTPUT_SAMPLE_RATE: int = int(os.getenv("OUTPUT_SAMPLE_RATE", "44100")) # Default to 44.1kHz
+# *** CHANGE: Set default output rate to 48kHz ***
+OUTPUT_SAMPLE_RATE: int = int(os.getenv("OUTPUT_SAMPLE_RATE", "48000")) # Default to 48kHz
 
 # ------------------------------------------------------------------#
 # GPIO – push‑button + LED
