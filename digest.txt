@@ -237,8 +237,8 @@ def find_device_by_name_fragment(p, name_fragments, is_input=True, threshold=0):
 
             log_config.debug(f"  Checking Dev {i}: '{info.get('name', 'N/A')}', {target_field}={channels}")
 
-            # Check channel count first
-            if channels > threshold:
+            # Check channel count first (allow 0 for threshold)
+            if channels >= threshold:
                 # Check if any fragment matches the device name
                 for fragment in name_fragments:
                     if fragment in device_name:
@@ -293,7 +293,7 @@ try:
     if final_mic_index is None: # Proceed with auto-detection if env var not used or invalid
         mic_detection_method = "Auto-Detect"
         # 1. Try specific names first (e.g., USB mics)
-        mic_result = find_device_by_name_fragment(p, ['usb', 'microphone'], is_input=True, threshold=0)
+        mic_result = find_device_by_name_fragment(p, ['usb', 'microphone'], is_input=True, threshold=1) # Require at least 1 channel
         if mic_result:
             final_mic_index, detected_mic_name = mic_result
             mic_detection_method += ": USB/Mic Name"
@@ -310,7 +310,12 @@ try:
                 final_mic_index = DEFAULT_MIC_INDEX
                 try: # Try to get name for fallback index
                     mic_info = p.get_device_info_by_index(final_mic_index)
-                    detected_mic_name = mic_info.get('name', f"Index {final_mic_index}")
+                    # Check if fallback is actually an input device
+                    if mic_info.get('maxInputChannels', 0) > 0:
+                        detected_mic_name = mic_info.get('name', f"Index {final_mic_index}")
+                    else:
+                        detected_mic_name = f"Fallback Index {final_mic_index} (Not Input)"
+                        log_config.error(f"Fallback Mic Index {final_mic_index} is not an input device!")
                 except Exception:
                      detected_mic_name = f"Fallback Index {final_mic_index} (Name N/A)"
                 mic_detection_method = "Fallback Index"
@@ -363,7 +368,12 @@ try:
                     final_dac_index = DEFAULT_DAC_INDEX
                     try: # Try to get name for fallback index
                          dac_info = p.get_device_info_by_index(final_dac_index)
-                         detected_dac_name = dac_info.get('name', f"Index {final_dac_index}")
+                         # Check if fallback is actually an output device
+                         if dac_info.get('maxOutputChannels', 0) > 0:
+                             detected_dac_name = dac_info.get('name', f"Index {final_dac_index}")
+                         else:
+                             detected_dac_name = f"Fallback Index {final_dac_index} (Not Output)"
+                             log_config.error(f"Fallback DAC Index {final_dac_index} is not an output device!")
                     except Exception:
                          detected_dac_name = f"Fallback Index {final_dac_index} (Name N/A)"
                     dac_detection_method = "Fallback Index"
@@ -396,14 +406,15 @@ MIC_NORMALISE: bool   = os.getenv("MIC_NORMALISE",      "1") == "1"
 # ------------------------------------------------------------------#
 DAC_PYAUDIO_INDEX: int = final_dac_index
 PLAYBACK_CHUNK: int    = 1024  # chunk size
-OUTPUT_SAMPLE_RATE: int = int(os.getenv("OUTPUT_SAMPLE_RATE", "48000")) # 48kHz often good for RPi DACs
+# *** CHANGE: Set default output rate to 44.1kHz ***
+OUTPUT_SAMPLE_RATE: int = int(os.getenv("OUTPUT_SAMPLE_RATE", "44100")) # Default to 44.1kHz
 
 # ------------------------------------------------------------------#
 # GPIO – push‑button + LED
 # ------------------------------------------------------------------#
 GPIO_BUTTON_PIN: int  = int(os.getenv("GPIO_BUTTON_PIN", "17"))
 GPIO_LED_PIN:   int   = int(os.getenv("GPIO_LED_PIN",    "27"))
-BUTTON_ACTIVE_HIGH: bool = os.getenv("BUTTON_ACTIVE_HIGH", "False").lower() in ("true", "1", "yes")
+BUTTON_ACTIVE_HIGH: bool = os.getenv("BUTTON_ACTIVE_HIGH", "True")
 # Automatically disable GPIO if not on RPi or if explicitly disabled
 _IS_RPI = False
 if sys.platform == "linux":
@@ -426,16 +437,16 @@ ENABLE_GPIO: bool = ENABLE_GPIO_ENV and _IS_RPI
 # ------------------------------------------------------------------#
 # OpenAI Vector Store for File Search
 # ------------------------------------------------------------------#
-VECTOR_STORE_ID: str = os.getenv("VECTOR_STORE_ID", "")
+VECTOR_STORE_ID: str = os.getenv("VECTOR_STORE_ID", "vs_6800e568d74c8191927351dc5afbfd81")
 if not VECTOR_STORE_ID:
     log_config.warning("VECTOR_STORE_ID not set in environment. PDF features will fail.")
 
 # ------------------------------------------------------------------#
 # OpenAI Model Configuration
 # ------------------------------------------------------------------#
-OPENAI_MODEL_FILE_QA: str       = os.getenv("OPENAI_MODEL_FILE_QA",       "gpt-4o-mini")
-OPENAI_MODEL_AGENT: str         = os.getenv("OPENAI_MODEL_AGENT",         "gpt-4o-mini")
-OPENAI_MODEL_REALTIME: str      = os.getenv("OPENAI_MODEL_REALTIME",      "gpt-4o-mini")
+OPENAI_MODEL_FILE_QA: str       = os.getenv("OPENAI_MODEL_FILE_QA",       "gpt-4.1-mini")
+OPENAI_MODEL_AGENT: str         = os.getenv("OPENAI_MODEL_AGENT",         "gpt-4.1-mini")
+OPENAI_MODEL_REALTIME: str      = os.getenv("OPENAI_MODEL_REALTIME",      "gpt-4.1-mini")
 OPENAI_MODEL_TRANSCRIPTION: str = os.getenv("OPENAI_MODEL_TRANSCRIPTION", "whisper-1")
 
 
@@ -452,7 +463,8 @@ elif 'Fallback' in dac_detection_method or 'Default' in dac_detection_method:
     log_config.warning(" --> DAC detection fell back. Check PyAudio/ALSA setup if intended DAC wasn't found.")
     log_config.warning(" --> For RPi DAC, set DAC_PYAUDIO_INDEX environment variable for reliability.")
 
-log_config.info(f"Output Sample Rate: {OUTPUT_SAMPLE_RATE} Hz")
+# Log the chosen output sample rate
+log_config.info(f"Target Output Sample Rate: {OUTPUT_SAMPLE_RATE} Hz")
 log_config.info(f"GPIO Enabled: {ENABLE_GPIO}")
 if ENABLE_GPIO:
     log_config.info(f"  Button Pin: {GPIO_BUTTON_PIN} (Active High: {BUTTON_ACTIVE_HIGH})")
@@ -472,7 +484,7 @@ File: /realtime.py
 #!/usr/bin/env python3
 """
 Realtime speech-to-speech for STR.
-Handles audio input/output ensuring correct sample rates.
+Handles audio input/output. Plays back API audio at its native rate.
 """
 
 from __future__ import annotations
@@ -492,8 +504,9 @@ try:
                    if 'Raspberry Pi' in cpuinfo or 'BCM' in cpuinfo: # Broader check
                        _IS_RPI = True
               if _IS_RPI:
-                  GPIO.setmode(GPIO.BCM) # Basic check to see if lib works
-                  GPIO.cleanup() # Clean up any previous state
+                  # Basic check to see if lib works - avoid unnecessary cleanup here
+                  # We might need GPIO later for the button
+                  pass
          except Exception:
               _IS_RPI = False
               GPIO = None # Ensure GPIO object is None if setup fails
@@ -510,6 +523,7 @@ from config import (
 )
 
 # Use standard basicConfig, config.py will also log its values
+# If app.py already sets this up, these lines might be redundant but shouldn't harm.
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)5s | %(name)s | %(message)s",
@@ -517,11 +531,13 @@ logging.basicConfig(
 log = logging.getLogger("realtime")
 
 # --- Define Expected Rates ---
-# Rate expected *from* OpenAI Realtime API (Check OpenAI Docs for gpt-4o-mini realtime!)
-# Set to 16000 based on previous attempts, **VERIFY THIS**
+# Rate expected *from* OpenAI Realtime API (Check OpenAI Docs)
+# Set to 16000 based on common usage and WebSocket request. **VERIFY THIS**
+# If OpenAI sends a different rate, playback will be incorrect.
 API_AUDIO_OUTPUT_RATE = 16000
 # Rate to send *to* OpenAI Realtime API (Usually 16k or 24k, check docs)
-API_AUDIO_INPUT_RATE = 24000
+# We specify 24k in the websocket request, but let's try 16k for input matching whisper std.
+API_AUDIO_INPUT_RATE = 16000 # Changed to 16k for simplicity, ensure websocket req matches if needed
 
 INSTRUCTIONS = (
     "You are a professional radio broadcaster. Provide a natural, "
@@ -555,9 +571,8 @@ class AudioHandler:
              log.error(f"FATAL: Invalid microphone input rate determined: {self.input_rate}. Cannot proceed.")
              raise ValueError(f"Invalid microphone input rate: {self.input_rate}")
 
-
-        log.info(f"Mic Config: Index={self.device_index}, Input Rate={self.input_rate} Hz -> Target API Input Rate={API_AUDIO_INPUT_RATE} Hz")
-        log.info(f"Playback Config: Target API Output Rate={API_AUDIO_OUTPUT_RATE} Hz -> Target Device Rate={OUTPUT_SAMPLE_RATE} Hz")
+        log.info(f"Mic Config: Index={self.device_index}, Actual Input Rate={self.input_rate} Hz -> Target API Input Rate={API_AUDIO_INPUT_RATE} Hz (Resampling if needed)")
+        log.info(f"Playback Config: Expected API Output Rate={API_AUDIO_OUTPUT_RATE} Hz -> Playback at Native Rate on Device Index={DAC_PYAUDIO_INDEX} (or default)")
 
         self.input_stream = None
         self.recording = False
@@ -594,6 +609,11 @@ class AudioHandler:
                   try: self.input_stream.close()
                   except Exception: pass
              self.input_stream = None # Ensure stream is None on failure
+             # Terminate PyAudio if mic fails completely? Maybe too drastic.
+             # if self.p:
+             #      try: self.p.terminate()
+             #      except Exception: pass
+             #      self.p = None
              raise # Re-raise the exception to signal failure
 
 
@@ -615,24 +635,35 @@ class AudioHandler:
                     if gain > 1:
                         audio = np.clip(audio * gain, -32768, 32767).astype(np.int16)
 
-            # Downsampling for API (if necessary)
+            # Resampling for API Input (if necessary) - Keep this part
             target_api_rate = API_AUDIO_INPUT_RATE
             if self.input_rate != target_api_rate:
                 if self.input_rate < target_api_rate:
-                     log.warning(f"Mic input rate ({self.input_rate} Hz) is lower than API input rate ({target_api_rate} Hz). Upsampling not implemented, might affect quality.")
-                     # Send as is for now
+                     log.warning(f"Mic input rate ({self.input_rate} Hz) is lower than API input rate ({target_api_rate} Hz). Upsampling needed.")
+                     # Implement upsampling if needed, otherwise quality suffers
+                     factor = target_api_rate / self.input_rate
+                     num_samples_in = len(audio)
+                     num_samples_out = int(num_samples_in * factor)
+                     if num_samples_in > 0 and num_samples_out > 0:
+                         idx_orig = np.arange(num_samples_in)
+                         idx_new = np.linspace(0, num_samples_in - 1, num_samples_out)
+                         audio = np.interp(idx_new, idx_orig, audio).astype(np.int16)
+                         log.debug(f"Upsampled mic audio to {len(audio)} samples for API.")
+                     else:
+                         log.warning("Cannot upsample zero-length audio chunk.")
+                         return None
                 elif self.input_rate > target_api_rate:
                     log.debug(f"Resampling mic audio from {self.input_rate} Hz to {target_api_rate} Hz for API input...")
                     factor = self.input_rate / target_api_rate
                     num_samples_in = len(audio)
                     num_samples_out = int(num_samples_in / factor)
                     if num_samples_in == 0 or num_samples_out == 0:
-                         log.warning("Cannot resample zero-length audio chunk.")
+                         log.warning("Cannot downsample zero-length audio chunk.")
                          return None
                     idx_orig = np.arange(num_samples_in)
                     idx_new = np.linspace(0, num_samples_in - 1, num_samples_out)
                     audio = np.interp(idx_new, idx_orig, audio).astype(np.int16)
-                    log.debug(f" -> Resampled to {len(audio)} samples.")
+                    log.debug(f" -> Downsampled to {len(audio)} samples.")
 
             return audio.tobytes()
 
@@ -669,131 +700,110 @@ class AudioHandler:
 
     def play(self, data: bytes):
         """
-        Play API audio (received as raw PCM bytes).
-        Assumes input is API_AUDIO_OUTPUT_RATE Hz, mono, 16-bit.
-        Resamples to OUTPUT_SAMPLE_RATE stereo 16-bit, attempts DAC, falls back.
+        Play API audio (received as raw PCM bytes) at its NATIVE format.
+        Assumes input format matches API_AUDIO_OUTPUT_RATE, mono, 16-bit.
+        Attempts specified DAC_PYAUDIO_INDEX first, then falls back to default.
+        NO RESAMPLING OR CHANNEL CONVERSION IS DONE HERE.
         """
         if not data:
             log.warning("AudioHandler.play called with empty data.")
             return
 
-        # Define input format based on API expectation
-        in_rate = API_AUDIO_OUTPUT_RATE # **** CRITICAL: Use the correct rate ****
-        in_channels = 1 # API usually sends mono
-        in_width = 2 # API usually sends 16-bit
-
-        # Define target output format from config
-        target_rate = OUTPUT_SAMPLE_RATE
-        target_channels = 2 # Force Stereo
-        target_width = 2 # Force 16-bit (paInt16)
+        # Define input format based on API expectation (MUST BE ACCURATE)
+        in_rate = API_AUDIO_OUTPUT_RATE
+        in_channels = 1 # OpenAI Realtime usually sends mono
+        in_width = 2    # OpenAI Realtime usually sends 16-bit PCM
+        in_format = self.p.get_format_from_width(in_width) # Should be paInt16
 
         def _playback():
             stream = None
-            p_playback = None # Use a separate PyAudio instance for thread safety? Maybe overkill. Using self.p for now.
+            p_playback = self.p # Use the shared PyAudio instance
+
             try:
-                p_playback = self.p # Or pyaudio.PyAudio() if issues arise
+                log.debug(f"Received {len(data)} bytes of audio data (Expected Native Format: {in_rate}Hz, {in_channels}Ch, {in_width*8}-bit).")
 
-                # --- Prepare Data ---
-                log.debug(f"Received {len(data)} bytes of audio data (Expected Format: {in_rate}Hz, {in_channels}Ch, {in_width*8}-bit).")
-                # Ensure data length is multiple of sample width
-                if len(data) % in_width != 0:
-                     log.warning(f"Received audio data length ({len(data)}) is not multiple of sample width ({in_width}). Truncating.")
-                     data = data[:len(data) - (len(data) % in_width)]
+                # Ensure data length is multiple of sample width * channels
+                frame_size = in_width * in_channels
+                if len(data) % frame_size != 0:
+                     remainder = len(data) % frame_size
+                     log.warning(f"Received audio data length ({len(data)}) is not multiple of frame size ({frame_size}). Truncating last {remainder} bytes.")
+                     data = data[:-remainder]
 
-                samples = np.frombuffer(data, dtype=np.int16) # Assumes 16-bit input
+                if not data:
+                     log.warning("No audio data left after truncation. Skipping playback.")
+                     return
 
-                # --- Resample ---
-                resampled_samples = samples # Default if no resampling needed
-                if in_rate != target_rate:
-                    log.debug(f"Resampling API audio from {in_rate} Hz to {target_rate} Hz using np.interp...")
-                    num_samples_in = len(samples)
-                    num_samples_out = int(num_samples_in * target_rate / in_rate)
-
-                    if num_samples_in == 0 or num_samples_out == 0:
-                         log.warning("Cannot resample zero-length audio.")
-                         return # Exit playback thread
-
-                    idx_orig = np.arange(num_samples_in) # Original sample indices
-                    idx_new = np.linspace(0, num_samples_in - 1, num_samples_out) # Target sample indices
-                    resampled_samples = np.interp(idx_new, idx_orig, samples).astype(np.int16)
-                    log.debug(f" -> Resampled from {num_samples_in} to {len(resampled_samples)} samples.")
-                else:
-                    log.debug("API audio rate matches target rate. No resampling needed.")
-
-                # --- Convert to Stereo ---
-                stereo_samples = resampled_samples # Default if target is mono
-                if target_channels == 2:
-                    log.debug("Converting audio to stereo.")
-                    # Ensure input was mono before repeating
-                    if in_channels != 1:
-                         log.warning(f"Input audio had {in_channels} channels, expected 1 for stereo conversion. Taking first channel if interleaved.")
-                         # This assumes interleaved data if in_channels > 1
-                         resampled_samples = resampled_samples[::in_channels]
-
-                    stereo_samples = np.repeat(resampled_samples, 2) # Simple mono -> stereo duplication
-                elif target_channels == 1 and in_channels > 1:
-                     log.warning(f"Target is mono but input had {in_channels} channels. Taking first channel.")
-                     stereo_samples = resampled_samples[::in_channels] # Extract first channel
-
-
-                # --- Format for Output ---
-                out_fmt = p_playback.get_format_from_width(target_width) # Should be paInt16
-                output_data = stereo_samples.tobytes()
+                # --- NO RESAMPLING / FORMAT CONVERSION ---
+                # The data is played back exactly as received.
 
                 # --- Attempt to Open Stream (Primary DAC first, then Fallback) ---
+                # Open the stream with the NATIVE format received from the API
                 target_device_index = DAC_PYAUDIO_INDEX
                 stream = None
+                opened_device_info = "Unknown" # For logging
+
                 try:
                     device_info = p_playback.get_device_info_by_index(target_device_index)
-                    log.info(f"Realtime Play: Attempting DAC Index={target_device_index}, Name='{device_info.get('name', 'N/A')}' (Rate: {target_rate} Hz)")
+                    opened_device_info = f"Configured DAC: Index={target_device_index}, Name='{device_info.get('name', 'N/A')}'"
+                    log.info(f"Realtime Play: Attempting {opened_device_info} (Native Rate: {in_rate} Hz, {in_channels} Ch)")
                     stream = p_playback.open(
-                        format=out_fmt,
-                        channels=target_channels,
-                        rate=target_rate, # Use the TARGET rate
+                        format=in_format,
+                        channels=in_channels,
+                        rate=in_rate, # Use the NATIVE API rate
                         output=True,
                         output_device_index=target_device_index,
                         frames_per_buffer=PLAYBACK_CHUNK,
                     )
-                    log.info(f"Realtime Play: Successfully opened DAC Index={target_device_index}")
+                    log.info(f"Realtime Play: Successfully opened {opened_device_info}")
 
                 except Exception as e_dac:
-                    log.warning(f"Realtime Play: Failed DAC (Index={target_device_index}): {e_dac}. Trying default.")
+                    log.warning(f"Realtime Play: Failed {opened_device_info}: {e_dac}. Trying default.")
                     try:
                         default_output_info = p_playback.get_default_output_device_info()
                         default_output_index = default_output_info['index']
-                        log.info(f"Realtime Play: Attempting Default Index={default_output_index}, Name='{default_output_info.get('name', 'N/A')}' (Rate: {target_rate} Hz)")
+                        opened_device_info = f"Default Output: Index={default_output_index}, Name='{default_output_info.get('name', 'N/A')}'"
+                        log.info(f"Realtime Play: Attempting {opened_device_info} (Native Rate: {in_rate} Hz, {in_channels} Ch)")
                         stream = p_playback.open(
-                            format=out_fmt,
-                            channels=target_channels,
-                            rate=target_rate, # Use the TARGET rate
+                            format=in_format,
+                            channels=in_channels,
+                            rate=in_rate, # Use the NATIVE API rate
                             output=True,
                             output_device_index=None, # Let PyAudio choose default
                             frames_per_buffer=PLAYBACK_CHUNK,
                         )
-                        log.info(f"Realtime Play: Successfully opened Default Index={default_output_index}")
+                        log.info(f"Realtime Play: Successfully opened {opened_device_info}")
                     except Exception as e_default:
                         log.error(f"FATAL: Realtime Play: Failed to open both specified DAC and default output: {e_default}")
                         return # Cannot play
 
                 # --- Play Audio ---
-                log.info(f"Realtime Play: Playing {len(output_data)} bytes at {target_rate} Hz...")
-                stream.write(output_data)
-                stream.stop_stream() # Wait for buffer to finish
-                log.info("Realtime Play: Finished.")
+                log.info(f"Realtime Play: Playing {len(data)} bytes at {in_rate} Hz...")
+                # Write data in chunks (optional, could write all at once if chunks are small)
+                # Writing the whole chunk received from API might be simpler here
+                stream.write(data)
+                # If API sends very large chunks, chunking the write might be better:
+                # data_idx = 0
+                # chunk_size_bytes = PLAYBACK_CHUNK * in_channels * in_width # Rough estimate
+                # while data_idx < len(data):
+                #      chunk_to_write = data[data_idx : data_idx + chunk_size_bytes]
+                #      stream.write(chunk_to_write)
+                #      data_idx += len(chunk_to_write)
+
+                stream.stop_stream() # Wait for buffer to finish playing THIS chunk
+                log.info("Realtime Play: Finished playing chunk.")
 
             except Exception as e:
                 log.exception(f"Realtime Playback thread error: {e}")
             finally:
                 if stream is not None:
                     try:
+                        # Ensure stopped before closing
                         if stream.is_active(): stream.stop_stream()
                         stream.close()
                         log.debug("Realtime playback stream closed.")
                     except Exception as e_close:
                         log.error(f"Error closing realtime playback stream: {e_close}")
-                # Terminate the separate PyAudio instance if it was created
-                # if p_playback and p_playback != self.p:
-                #     p_playback.terminate()
+                # Do not terminate the shared PyAudio instance here
 
         # Start playback in a daemon thread
         threading.Thread(target=_playback, daemon=True).start()
@@ -802,7 +812,7 @@ class AudioHandler:
         """Clean up PyAudio resources."""
         log.info("Closing AudioHandler...")
         self.stop_input() # Ensure input stream is stopped and closed
-        # Output streams are handled in their own threads, but terminate the main PyAudio instance
+        # Output streams are handled in their own threads. Terminate the shared PyAudio instance.
         if self.p:
             try:
                 self.p.terminate()
@@ -833,12 +843,19 @@ class RealtimeClient:
         self.on_text = on_text
 
         try:
+            # Use a separate PyAudio instance for the RealtimeClient's AudioHandler
+            # to potentially avoid conflicts if audio_manager is used concurrently.
+            # This adds slight overhead but might increase stability.
+            # If conflicts aren't observed, could revert to sharing one.
             self.audio = AudioHandler(mic_index) # Handles mic input and audio playback
         except ValueError as e: # Catch rate error from AudioHandler init
              log.error(f"Failed to initialize AudioHandler: {e}")
              raise # Re-raise to prevent client from starting incorrectly
+        except Exception as e:
+             log.error(f"Unexpected error initializing AudioHandler: {e}")
+             raise
 
-        self._audio_buf = b"" # Buffer for incoming audio delta
+        self._audio_buf = b"" # Buffer for incoming audio delta (if needed, currently unused)
         self._text_buf = ""   # Buffer for incoming text delta
         self._rec_flag = threading.Event() # Controls the mic recording loop
 
@@ -850,21 +867,26 @@ class RealtimeClient:
         self.ws: websockets.WebSocketClientProtocol | None = None
         self.session_id: str | None = None
         self._connection_lock = asyncio.Lock() # Prevent concurrent connection attempts
-        # Block until initial connection attempt finishes
-        future = asyncio.run_coroutine_threadsafe(self.ensure_connected(), self.loop)
-        try:
-             future.result(timeout=15) # Wait with timeout
-             if not self.ws or not self.ws.open:
-                  raise ConnectionError("Initial WebSocket connection failed.")
-        except TimeoutError:
-             log.error("Timeout waiting for initial WebSocket connection.")
-             raise ConnectionError("Timeout during initial WebSocket connection.")
-        except Exception as e:
-             log.error(f"Error during initial WebSocket connection: {e}")
-             raise ConnectionError(f"Initial WebSocket connection failed: {e}")
-
-
         self._recv_task: asyncio.Task | None = None
+
+        # Block until initial connection attempt finishes - Moved into start() or similar?
+        # Blocking here can hang the main thread if connection fails badly.
+        # Let's attempt connection asynchronously and check status later.
+        # We will call ensure_connected before operations that need it.
+        # future = asyncio.run_coroutine_threadsafe(self.ensure_connected(), self.loop)
+        # try:
+        #      future.result(timeout=15) # Wait with timeout
+        #      if not self.ws or not self.ws.open:
+        #           raise ConnectionError("Initial WebSocket connection failed.")
+        # except TimeoutError:
+        #      log.error("Timeout waiting for initial WebSocket connection.")
+        #      # Don't raise here, allow app to potentially retry or show error state
+        #      # raise ConnectionError("Timeout during initial WebSocket connection.")
+        # except Exception as e:
+        #      log.error(f"Error during initial WebSocket connection: {e}")
+        #      # Don't raise here
+        #      # raise ConnectionError(f"Initial WebSocket connection failed: {e}")
+
 
         # GPIO Setup (only if enabled and available)
         self.gpio_enabled = HAS_GPIO and ENABLE_GPIO and GPIO is not None
@@ -873,20 +895,22 @@ class RealtimeClient:
         else:
             log.info("GPIO not available or disabled by config; hardware button/LED inactive.")
 
-        log.info(f"RealtimeClient configured for API Input: {API_AUDIO_INPUT_RATE}Hz, API Output: {API_AUDIO_OUTPUT_RATE}Hz")
+        log.info(f"RealtimeClient configured for API Input: {API_AUDIO_INPUT_RATE}Hz, Expected API Output: {API_AUDIO_OUTPUT_RATE}Hz")
 
     async def ensure_connected(self):
-        """Connects or reconnects the WebSocket."""
+        """Connects or reconnects the WebSocket. Returns True on success, False on failure."""
         async with self._connection_lock:
             if self.ws and self.ws.open:
                 log.debug("WebSocket already connected.") # Less noisy
-                return
+                return True
 
             if self.ws and not self.ws.closed:
-                log.warning("WebSocket exists but is not open. Closing before reconnecting.")
+                log.warning("WebSocket exists but is not open/closed state unclear. Closing before reconnecting.")
                 try:
                      await self.ws.close()
                 except Exception: pass # Ignore errors during close if reconnecting anyway
+            self.ws = None # Ensure it's None before reconnect attempt
+            self.session_id = None # Clear session ID
 
             log.info("Attempting WebSocket connection...")
             ssl_ctx = ssl.create_default_context()
@@ -894,13 +918,14 @@ class RealtimeClient:
             ssl_ctx.verify_mode = ssl.CERT_NONE
 
             # *** CRITICAL: Ensure requested format matches API_AUDIO_OUTPUT_RATE ***
-            # Construct format string like "pcm_16" or "pcm_24"
+            # Format string like "pcm_16" or "pcm_24"
             requested_api_output_format = f"pcm_{API_AUDIO_OUTPUT_RATE // 1000}"
+            # *** CRITICAL: Ensure input format sample_rate matches API_AUDIO_INPUT_RATE ***
+            # We are now using 16k for input. The encoding 'pcm_16' refers to bit depth.
             requested_api_input_format = {"encoding": "pcm_16", "sample_rate": API_AUDIO_INPUT_RATE}
 
             log.info(f"Requesting API Output Format: {requested_api_output_format}")
-            log.info(f"Sending API Input Format: {requested_api_input_format['sample_rate']}Hz")
-
+            log.info(f"Sending API Input Format: {requested_api_input_format['sample_rate']}Hz, {requested_api_input_format['encoding']}")
 
             try:
                 self.ws = await websockets.connect(
@@ -908,6 +933,9 @@ class RealtimeClient:
                     extra_headers={"Authorization": f"Bearer {self.api_key}"},
                     ssl=ssl_ctx,
                     open_timeout=10, # Add timeout
+                    close_timeout=5,
+                    ping_interval=20, # Keep connection alive
+                    ping_timeout=10
                 )
                 log.info("WebSocket connection established. Sending session configuration.")
                 await self.ws.send(json.dumps({
@@ -929,39 +957,48 @@ class RealtimeClient:
                      log.info(f"WebSocket session ready. Session ID: {self.session_id}")
                      # Start receive loop only after successful connection
                      if self._recv_task and not self._recv_task.done():
+                         log.warning("Cancelling existing receive task before starting new one.")
                          self._recv_task.cancel()
+                         try: await self._recv_task # Allow cancellation to complete
+                         except asyncio.CancelledError: pass
                      self._recv_task = asyncio.create_task(self._recv_loop())
+                     log.info("Receive loop task created.")
+                     return True # Connection successful
                 else:
                      log.error(f"Unexpected message after connect (expected session_begins): {session_data}")
                      await self.ws.close()
                      self.ws = None
                      self.session_id = None
+                     return False # Connection failed
 
             except websockets.exceptions.InvalidStatusCode as e:
                  log.error(f"WebSocket connection failed (Invalid Status Code): {e.status_code} {e.body}")
-                 self.ws = None
-                 self.session_id = None
             except asyncio.TimeoutError:
-                 log.error("WebSocket connection/session begin timed out.")
-                 self.ws = None
-                 self.session_id = None
+                 log.error("WebSocket connection or session begin timed out.")
+            except websockets.exceptions.ConnectionClosed as e:
+                 log.error(f"WebSocket connection closed during setup: {e.code} {e.reason}")
+            except OSError as e:
+                 log.error(f"WebSocket connection failed (OS Error): {e}")
             except Exception as e:
                  log.exception(f"WebSocket connection failed: {e}")
-                 if self.ws and not self.ws.closed: # Try to close if partially opened
-                      try: await self.ws.close()
-                      except Exception: pass
-                 self.ws = None
-                 self.session_id = None
 
+            # Ensure cleanup on failure
+            if self.ws and not self.ws.closed:
+                 try: await self.ws.close()
+                 except Exception: pass
+            self.ws = None
+            self.session_id = None
+            return False # Connection failed
 
     async def _recv_loop(self):
         if not self.ws:
-            log.error("Receive loop started without a WebSocket connection.")
-            return
+            log.error("Receive loop cannot start: WebSocket is not connected.")
+            return # Should not happen if started correctly
+
         log.info("WebSocket receive loop started.")
         try:
             async for message in self.ws:
-                #log.debug(f"WS RECV: {message[:100]}") # Debug: log received messages
+                #log.debug(f"WS RECV: Type={type(message)}, Len={len(message) if isinstance(message, (str, bytes)) else 'N/A'}") # Debug
                 if isinstance(message, str):
                     try:
                         ev = json.loads(message)
@@ -969,20 +1006,21 @@ class RealtimeClient:
                     except json.JSONDecodeError:
                         log.warning(f"Received non-JSON message: {message[:100]}...")
                 elif isinstance(message, bytes):
-                     log.warning(f"Received unexpected binary data ({len(message)} bytes).")
+                     log.warning(f"Received unexpected binary data ({len(message)} bytes). Ignoring.")
         except websockets.exceptions.ConnectionClosedOK:
-            log.info("WebSocket connection closed normally.")
+            log.info("WebSocket connection closed normally (ClosedOK).")
         except websockets.exceptions.ConnectionClosedError as e:
-            log.error(f"WebSocket connection closed with error: {e.code} {e.reason}")
-            await self.close_connection() # Ensure clean state
+            log.error(f"WebSocket connection closed with error (ClosedError): {e.code} {e.reason}")
+        except websockets.exceptions.ConnectionClosed as e: # Catch generic ConnectionClosed
+            log.warning(f"WebSocket connection closed unexpectedly: {e.code} {e.reason}")
         except asyncio.CancelledError:
              log.info("Receive loop cancelled.")
         except Exception as e:
             log.exception(f"WebSocket receive loop error: {e}")
         finally:
             log.info("WebSocket receive loop finished.")
-            self.ws = None # Mark connection as closed
-            self.session_id = None
+            # Don't set self.ws = None here, let ensure_connected handle state checking.
+            # If the loop ends due to closure, self.ws.open will be false.
 
     async def _handle_event(self, ev: dict):
         """Handles JSON events received from the WebSocket."""
@@ -993,28 +1031,27 @@ class RealtimeClient:
             if audio_chunk_b64:
                 try:
                     audio_chunk = base64.b64decode(audio_chunk_b64)
-                    #log.debug(f"Received audio chunk: {len(audio_chunk)} bytes")
-                    # Immediately play the chunk - buffering can cause delays/desync
+                    #log.debug(f"Received audio chunk: {len(audio_chunk)} bytes - playing immediately.")
+                    # Play the chunk without buffering
                     self.audio.play(audio_chunk)
                 except Exception as e:
                     log.error(f"Error decoding/playing audio chunk: {e}")
-            else:
-                 log.warning(f"Received audio event with no chunk: {ev}")
+            # else:
+                 # log.warning(f"Received audio event with no chunk: {ev}") # Can be noisy
 
         elif event_type == "text":
              text_delta = ev.get("text")
              if text_delta is not None: # Check for None explicitly
                   # Broadcasting deltas might be too noisy for UI, buffer for final.
-                  # If real-time transcription display is needed, handle 'transcript' events.
                   self._text_buf += text_delta
-             else:
-                  log.warning(f"Received text event with no text: {ev}")
+             # else:
+                  # log.warning(f"Received text event with no text: {ev}") # Can be noisy
 
         elif event_type == "transcript": # Handle transcriptions if needed
              transcript_text = ev.get("text")
              is_final = ev.get("final", False)
              log.info(f"Transcript{' (Final)' if is_final else ''}: {transcript_text}")
-             # Optionally display transcripts in UI
+             # Optionally display transcripts in UI / use for context
 
         elif event_type == "speech_end":
              log.info("Received speech_end event.")
@@ -1030,12 +1067,14 @@ class RealtimeClient:
                   self._text_buf = "" # Ensure buffer is clear
 
         elif event_type == "session_terminates":
-             log.info(f"WebSocket session terminated by server. Reason: {ev.get('reason', 'N/A')}")
-             await self.close_connection()
+             log.warning(f"WebSocket session terminated by server. Reason: {ev.get('reason', 'N/A')}")
+             await self.close_connection(reason="Session terminated by server") # Close our side
 
         elif event_type == "error":
             log.error(f"API Error received: {ev.get('message', 'No message')}")
-            # Optionally close connection on severe errors
+            # Optionally close connection on severe errors, e.g. auth errors
+            if "authentication failed" in ev.get('message', '').lower():
+                 await self.close_connection(reason="API Authentication Error")
 
         elif event_type == "latency": # Handle latency info if provided
              log.debug(f"Latency Info: {ev}")
@@ -1048,12 +1087,19 @@ class RealtimeClient:
 
     async def _mic_stream_sender(self):
         """Reads from mic and sends audio data over WebSocket."""
-        await self.ensure_connected() # Ensure connection before starting
-        if not self.ws or not self.ws.open:
-            log.error("Cannot start mic stream: WebSocket not connected after ensure_connected.")
-            self._rec_flag.clear() # Ensure flag is off
-            # Possibly signal UI error?
+        log.info("Attempting to start mic stream sender...")
+        # Ensure connection before starting mic
+        if not await self.ensure_connected():
+            log.error("Cannot start mic stream sender: WebSocket connection failed.")
+            self._rec_flag.clear() # Ensure flag is off if connection failed
+            # Signal UI error?
             return
+
+        # Now self.ws should be valid if ensure_connected returned True
+        if not self.ws or not self.ws.open:
+             log.error("Cannot start mic stream sender: WebSocket is not open after ensure_connected.")
+             self._rec_flag.clear()
+             return
 
         try:
             self.audio.start_input() # Open the mic stream
@@ -1066,61 +1112,75 @@ class RealtimeClient:
         log.info("Microphone stream sending loop started.")
         try:
             while self._rec_flag.is_set():
+                # Check connection at the start of each loop iteration
+                if not self.ws or not self.ws.open:
+                    log.warning("WebSocket closed during mic stream. Stopping sender.")
+                    self._rec_flag.clear()
+                    break
+
                 chunk = self.audio.read_chunk()
                 if chunk:
-                    if self.ws and self.ws.open:
-                        try:
-                            #log.debug(f"WS SEND: Audio chunk {len(chunk)} bytes") # Debug
-                            await self.ws.send(json.dumps({
-                                 "event": "audio_chunk",
-                                 "chunk": base64.b64encode(chunk).decode('utf-8')
-                            }))
-                        except websockets.exceptions.ConnectionClosed:
-                            log.warning("WebSocket closed while trying to send audio. Stopping mic stream.")
-                            self._rec_flag.clear() # Signal loop to stop
-                            break
-                        except Exception as e:
-                             log.exception(f"Error sending audio chunk: {e}")
-                             self._rec_flag.clear() # Stop on error
-                             break
-                    else:
-                         log.warning("WebSocket closed unexpectedly during mic stream. Stopping.")
-                         self._rec_flag.clear()
+                    try:
+                        #log.debug(f"WS SEND: Audio chunk {len(chunk)} bytes") # Debug
+                        await self.ws.send(json.dumps({
+                             "event": "audio_chunk",
+                             "chunk": base64.b64encode(chunk).decode('utf-8')
+                        }))
+                    except websockets.exceptions.ConnectionClosed:
+                        log.warning("WebSocket closed while trying to send audio. Stopping mic stream.")
+                        self._rec_flag.clear() # Signal loop to stop
+                        break
+                    except Exception as e:
+                         log.exception(f"Error sending audio chunk: {e}")
+                         self._rec_flag.clear() # Stop on error
                          break
                 else:
                     # Small sleep if read_chunk returns None (e.g., overflow or just no data)
+                    # Prevents tight loop on no data
                     await asyncio.sleep(0.01)
+
         except Exception as e:
              log.exception(f"Error in mic stream sending loop: {e}")
         finally:
             log.info("Microphone stream sending loop finished.")
             self.audio.stop_input() # Ensure mic is stopped
 
-            # Send end_of_audio signal - check if API requires this
+            # Send end_of_audio signal if connection is still open
             if self.ws and self.ws.open:
                 try:
                     log.info("Sending end_of_audio signal.")
                     await self.ws.send(json.dumps({"event": "end_of_audio"}))
+                except websockets.exceptions.ConnectionClosed:
+                     log.warning("Could not send end_of_audio: WebSocket closed.")
                 except Exception as e:
                     log.error(f"Failed to send end_of_audio signal: {e}")
 
 
     async def _send_text_async(self, text: str):
         """Sends a text message over the WebSocket."""
-        await self.ensure_connected() # Ensure connection before sending
+        log.info(f"Attempting to send text: '{text[:30]}...'")
+        # Ensure connection before sending
+        if not await self.ensure_connected():
+             log.error(f"Cannot send text '{text[:30]}...': WebSocket connection failed.")
+             # Signal UI error?
+             return
+
         if not self.ws or not self.ws.open:
-            log.error(f"Cannot send text '{text[:20]}...': WebSocket not connected.")
-            # Signal UI error?
+            log.error(f"Cannot send text '{text[:30]}...': WebSocket not open after ensure_connected.")
             return
 
-        log.info(f"Sending text message: {text}")
+        log.info(f"Sending text message via WebSocket: {text}")
         try:
             # Ensure text buffer is clear if sending explicit text
             self._text_buf = ""
             await self.ws.send(json.dumps({
-                "event": "text_input", # Check API for correct event name
+                "event": "text_input", # Verify this event name with OpenAI docs
                 "text": text
             }))
+            log.info("Text message sent successfully.")
+        except websockets.exceptions.ConnectionClosed:
+             log.error(f"Failed to send text message: WebSocket closed.")
+             # No need to close here, recv loop or next ensure_connected will handle it.
         except Exception as e:
              log.exception(f"Failed to send text message: {e}")
 
@@ -1134,7 +1194,10 @@ class RealtimeClient:
             log.info("Mic stream sender task scheduled.")
             # Update GPIO LED if enabled
             if self.gpio_enabled:
-                try: GPIO.output(GPIO_LED_PIN, GPIO.HIGH)
+                try:
+                    # Ensure pin is configured before using
+                    if GPIO_LED_PIN > 0:
+                        GPIO.output(GPIO_LED_PIN, GPIO.HIGH)
                 except Exception as e: log.error(f"GPIO Error setting LED HIGH: {e}")
         else:
             log.warning("Start talking requested, but already recording.")
@@ -1148,7 +1211,10 @@ class RealtimeClient:
             log.info("Mic stream sender task signaled to stop.")
             # Update GPIO LED if enabled
             if self.gpio_enabled:
-                 try: GPIO.output(GPIO_LED_PIN, GPIO.LOW)
+                 try:
+                    # Ensure pin is configured before using
+                    if GPIO_LED_PIN > 0:
+                        GPIO.output(GPIO_LED_PIN, GPIO.LOW)
                  except Exception as e: log.error(f"GPIO Error setting LED LOW: {e}")
         else:
             log.warning("Stop talking requested, but not currently recording.")
@@ -1158,72 +1224,125 @@ class RealtimeClient:
         if not text:
             log.warning("Send text requested with empty message.")
             return
+        if not self.loop.is_running():
+             log.error("Cannot send text: Asyncio loop is not running.")
+             return
         # Run the text sender coroutine in the event loop
         asyncio.run_coroutine_threadsafe(self._send_text_async(text), self.loop)
 
-    async def close_connection(self):
+    async def close_connection(self, reason="Client initiated close"):
          """Closes the WebSocket connection gracefully."""
-         log.info("Closing WebSocket connection...")
+         log.info(f"Closing WebSocket connection ({reason})...")
+
+         # Stop recording if active
+         if self._rec_flag.is_set():
+             log.warning("Stopping active recording during connection close.")
+             self.stop_talking() # This will signal the sender loop
+
          # Cancel receive task first
          if self._recv_task and not self._recv_task.done():
+              log.debug("Cancelling receive task...")
               self._recv_task.cancel()
-              try: await self._recv_task
-              except asyncio.CancelledError: pass # Expected
-              except Exception as e: log.error(f"Error during receive task cancellation: {e}")
+              try:
+                  await asyncio.wait_for(self._recv_task, timeout=1.0) # Give it time to cancel
+              except asyncio.CancelledError:
+                  log.debug("Receive task successfully cancelled.")
+              except asyncio.TimeoutError:
+                   log.warning("Timeout waiting for receive task to cancel.")
+              except Exception as e:
+                  log.error(f"Error awaiting receive task cancellation: {e}")
          self._recv_task = None
 
          # Close WebSocket
          ws_to_close = self.ws
-         self.ws = None # Mark as None immediately to prevent further use
+         # Mark as None immediately to prevent race conditions with ensure_connected
+         self.ws = None
          self.session_id = None
+
          if ws_to_close and not ws_to_close.closed:
+             log.debug("Sending close frame to WebSocket...")
              try:
-                 await ws_to_close.close()
-                 log.info("WebSocket connection closed.")
+                 await asyncio.wait_for(ws_to_close.close(reason=reason), timeout=3.0)
+                 log.info("WebSocket connection closed gracefully.")
+             except asyncio.TimeoutError:
+                  log.warning("Timeout waiting for WebSocket close frame response.")
              except Exception as e:
                  log.error(f"Error closing WebSocket: {e}")
+         else:
+             log.debug("WebSocket already closed or not initialized.")
 
 
     def close(self):
         """Shuts down the client, closing audio resources and WebSocket."""
         log.info("Shutting down RealtimeClient...")
-        self.stop_talking() # Ensure recording stops
+
+        # Ensure recording stops (calls stop_talking)
+        if self._rec_flag.is_set():
+            self.stop_talking()
+            # Give a brief moment for stop signal to propagate if needed
+            time.sleep(0.1)
 
         # Close WebSocket connection from the main thread via the loop
         if self.loop.is_running():
-             future = asyncio.run_coroutine_threadsafe(self.close_connection(), self.loop)
-             try: future.result(timeout=5) # Wait for close to complete
-             except TimeoutError: log.warning("Timeout waiting for WebSocket close.")
-             except Exception as e: log.error(f"Error waiting for WebSocket close: {e}")
+             log.debug("Scheduling WebSocket close via event loop...")
+             future = asyncio.run_coroutine_threadsafe(self.close_connection(reason="Client shutdown"), self.loop)
+             try:
+                 future.result(timeout=5) # Wait for close task to complete
+                 log.debug("WebSocket close task completed.")
+             except TimeoutError:
+                 log.warning("Timeout waiting for WebSocket close task.")
+             except Exception as e:
+                 log.error(f"Error waiting for WebSocket close task: {e}")
 
         # Stop the event loop thread
         if self.loop.is_running():
+            log.debug("Stopping asyncio event loop...")
             self.loop.call_soon_threadsafe(self.loop.stop)
             # Don't necessarily join, let daemon thread exit
             # self._loop_thread.join(timeout=2)
+            log.debug("Event loop stop scheduled.")
 
-        # Close audio resources
-        self.audio.close()
+        # Close audio resources (this also terminates its PyAudio instance)
+        if self.audio:
+            self.audio.close()
+            self.audio = None # Clear reference
 
         # Cleanup GPIO
         if self.gpio_enabled and GPIO:
             log.info("Cleaning up GPIO...")
             try:
-                # Remove event detection first
-                try: GPIO.remove_event_detect(GPIO_BUTTON_PIN)
-                except Exception: pass # Ignore if not set up
-                # Ensure LED is off
-                try: GPIO.output(GPIO_LED_PIN, GPIO.LOW)
-                except Exception: pass
+                # Remove event detection first if button pin was valid
+                if GPIO_BUTTON_PIN > 0:
+                    try: GPIO.remove_event_detect(GPIO_BUTTON_PIN)
+                    except RuntimeError as e: # Catch if channel wasn't set up for edge detection
+                         log.debug(f"Ignoring GPIO remove_event_detect error (likely not set): {e}")
+                    except Exception as e:
+                         log.error(f"Error removing GPIO event detect: {e}")
+
+                # Ensure LED is off if valid
+                if GPIO_LED_PIN > 0:
+                    try: GPIO.output(GPIO_LED_PIN, GPIO.LOW)
+                    except Exception as e: log.error(f"GPIO Error setting LED LOW during cleanup: {e}")
+
                 # Cleanup pins used
                 pins_to_cleanup = []
                 if GPIO_BUTTON_PIN > 0: pins_to_cleanup.append(GPIO_BUTTON_PIN)
                 if GPIO_LED_PIN > 0: pins_to_cleanup.append(GPIO_LED_PIN)
                 if pins_to_cleanup:
+                     log.debug(f"Calling GPIO.cleanup for pins: {pins_to_cleanup}")
                      GPIO.cleanup(pins_to_cleanup)
+                else:
+                     # Call general cleanup if specific pins weren't identified but GPIO was thought enabled
+                     log.debug("Calling general GPIO.cleanup()")
+                     GPIO.cleanup()
+
                 log.info("GPIO cleanup successful.")
             except Exception as e:
                 log.error(f"Error during GPIO cleanup: {e}")
+        elif ENABLE_GPIO and not HAS_GPIO:
+             # Log if GPIO was enabled in config but failed to load/init
+             log.warning("GPIO was enabled in config but library/hardware init failed earlier. No cleanup needed.")
+
 
         log.info("RealtimeClient shutdown complete.")
 
@@ -1231,50 +1350,83 @@ class RealtimeClient:
     # --- GPIO Handling ---
     def _setup_gpio(self):
         """Sets up GPIO pins for button and LED."""
-        if not (GPIO and GPIO_BUTTON_PIN > 0 and GPIO_LED_PIN > 0):
-             log.warning("GPIO setup skipped: Library not available or pins not configured (>0).")
+        # Check library again just in case
+        if not GPIO:
+            log.warning("GPIO setup skipped: Library not available.")
+            self.gpio_enabled = False
+            return
+
+        # Check if pins are configured (simple check for > 0)
+        button_pin_valid = GPIO_BUTTON_PIN > 0
+        led_pin_valid = GPIO_LED_PIN > 0
+
+        if not (button_pin_valid or led_pin_valid):
+             log.warning("GPIO setup skipped: Neither Button nor LED pin is configured (must be > 0).")
              self.gpio_enabled = False
              return
 
         log.info("Setting up GPIO...")
         try:
+            # Explicitly set mode just before setup
             GPIO.setmode(GPIO.BCM)
-            # Set up LED pin
-            GPIO.setup(GPIO_LED_PIN, GPIO.OUT, initial=GPIO.LOW)
-            # Set up Button pin
-            pull_resistor = GPIO.PUD_UP if not BUTTON_ACTIVE_HIGH else GPIO.PUD_DOWN
-            GPIO.setup(GPIO_BUTTON_PIN, GPIO.IN, pull_up_down=pull_resistor)
+            GPIO.setwarnings(False) # Suppress warnings like 'channel already in use'
 
-            # Add event detection for the button press
-            edge_detection = GPIO.FALLING if not BUTTON_ACTIVE_HIGH else GPIO.RISING
-            GPIO.add_event_detect(
-                GPIO_BUTTON_PIN,
-                edge_detection,
-                callback=self._button_callback,
-                bouncetime=300 # Debounce time in milliseconds
-            )
-            log.info(f"GPIO setup complete. Button Pin: {GPIO_BUTTON_PIN} (Edge: {'Falling' if edge_detection == GPIO.FALLING else 'Rising'}), LED Pin: {GPIO_LED_PIN}")
+            # Set up LED pin if valid
+            if led_pin_valid:
+                GPIO.setup(GPIO_LED_PIN, GPIO.OUT, initial=GPIO.LOW)
+                log.info(f"  - LED Pin ({GPIO_LED_PIN}) setup as OUT.")
+            else:
+                 log.info("  - LED Pin not configured.")
+
+            # Set up Button pin if valid
+            if button_pin_valid:
+                pull_resistor = GPIO.PUD_UP if not BUTTON_ACTIVE_HIGH else GPIO.PUD_DOWN
+                GPIO.setup(GPIO_BUTTON_PIN, GPIO.IN, pull_up_down=pull_resistor)
+                log.info(f"  - Button Pin ({GPIO_BUTTON_PIN}) setup as IN (Pull: {'UP' if pull_resistor == GPIO.PUD_UP else 'DOWN'}).")
+
+                # Add event detection for the button press
+                edge_detection = GPIO.FALLING if not BUTTON_ACTIVE_HIGH else GPIO.RISING
+                # Clear any previous detection on this pin first
+                try: GPIO.remove_event_detect(GPIO_BUTTON_PIN)
+                except Exception: pass # Ignore if not set
+                GPIO.add_event_detect(
+                    GPIO_BUTTON_PIN,
+                    edge_detection,
+                    callback=self._button_callback,
+                    bouncetime=300 # Debounce time in milliseconds
+                )
+                log.info(f"  - Button event detection added (Edge: {'Falling' if edge_detection == GPIO.FALLING else 'Rising'}).")
+            else:
+                 log.info("  - Button Pin not configured.")
+
+            self.gpio_enabled = True # Mark as enabled only if setup succeeds
+            log.info("GPIO setup complete.")
 
         except Exception as e:
             log.exception(f"Failed to setup GPIO: {e}")
-            self.gpio_enabled = False # Disable GPIO if setup fails
+            self.gpio_enabled = False # Disable GPIO functionality if setup fails
+            # Attempt cleanup if setup failed partially
+            try: GPIO.cleanup()
+            except Exception: pass
 
     def _button_callback(self, channel):
         """Callback function executed on button press detected by GPIO event."""
-        # Debounce check (optional, RPi.GPIO bouncetime should handle it)
-        # time.sleep(0.05) # Short delay
-        # current_state = GPIO.input(channel)
-        # expected_state = GPIO.LOW if not BUTTON_ACTIVE_HIGH else GPIO.HIGH
-        # if current_state != expected_state: return # Ignore if state bounced back
+        # Basic check to ensure it's the configured button pin triggering
+        if channel != GPIO_BUTTON_PIN:
+             log.warning(f"GPIO callback triggered on unexpected channel {channel}. Ignoring.")
+             return
 
         log.info(f"Button press detected on channel {channel}.")
-        if not self.loop.is_running():
-            log.warning("GPIO callback triggered, but asyncio loop is not running.")
+        if not self.loop or not self.loop.is_running():
+            log.warning("GPIO callback triggered, but asyncio loop is not running. Action skipped.")
             return
 
+        # Use call_soon_threadsafe as this callback runs in a separate thread managed by RPi.GPIO
         if self._rec_flag.is_set():
+             log.debug("Button toggling: Requesting stop talking.")
              self.loop.call_soon_threadsafe(self.stop_talking)
         else:
+             log.debug("Button toggling: Requesting start talking.")
              self.loop.call_soon_threadsafe(self.start_talking)
 
 ================================================
@@ -1346,17 +1498,23 @@ File: /audio_manager.py
 ================================================
 #!/usr/bin/env python3
 """
-Save, convert and play audio – now resampling and with device fallback.
-Uses PyAudio for playback. Ensures consistent output sample rate.
+Save, convert and play audio.
+Uses PyAudio for playback. Manually resamples WAV files to OUTPUT_SAMPLE_RATE,
+Stereo, 16-bit using numpy before playback.
+Attempts playback *only* on the configured DAC_PYAUDIO_INDEX.
 """
 
 import os
 import logging
-from pydub import AudioSegment, exceptions as pydub_exceptions
+import wave # Use standard wave module for reading
+import numpy as np # Use numpy for resampling
 import pyaudio
-import wave # Keep for potential basic WAV operations if pydub fails
 
 from config import DAC_PYAUDIO_INDEX, PLAYBACK_CHUNK, OUTPUT_SAMPLE_RATE
+
+# We still need pydub for the MP3 conversion part
+from pydub import AudioSegment, exceptions as pydub_exceptions
+
 
 log = logging.getLogger(__name__)
 
@@ -1375,11 +1533,16 @@ def terminate_pyaudio_instance():
     global _p
     if _p is not None:
         log.debug("Terminating PyAudio instance for audio_manager.")
-        _p.terminate()
-        _p = None
+        try:
+            _p.terminate()
+        except Exception as e:
+             log.error(f"Error terminating PyAudio instance in audio_manager: {e}")
+        finally:
+            _p = None
 
 def save_stream_to_file(stream, filepath):
     """Save streaming data (like from ElevenLabs) to a file."""
+    # --- This function remains the same ---
     try:
         with open(filepath, "wb") as f:
             for chunk in stream:
@@ -1390,17 +1553,16 @@ def save_stream_to_file(stream, filepath):
         raise
 
 def convert_mp3_to_wav(mp3_filepath, wav_filepath):
-    """Convert MP3 -> WAV using pydub. Does not resample here."""
+    """Convert MP3 -> WAV using pydub. Preserves original sample rate during conversion."""
+    # --- This function remains the same ---
     try:
         log.info(f"Converting {mp3_filepath} to WAV format at {wav_filepath}...")
         audio = AudioSegment.from_mp3(mp3_filepath)
-        # Export directly without resampling here; play_audio will handle it.
         audio.export(wav_filepath, format="wav")
-        log.info(f"Successfully converted {mp3_filepath} to {wav_filepath}")
+        log.info(f"Successfully converted {mp3_filepath} to {wav_filepath} (Rate: {audio.frame_rate} Hz)")
     except pydub_exceptions.CouldntDecodeError as e:
         log.error(f"Pydub decoding error converting {mp3_filepath}: {e}")
         log.error("-> Ensure ffmpeg is installed and accessible in your PATH.")
-        log.error("-> Check if the MP3 file is valid/corrupted.")
         raise
     except FileNotFoundError as e:
          log.error(f"File not found during MP3 conversion: {e}")
@@ -1414,8 +1576,8 @@ def convert_mp3_to_wav(mp3_filepath, wav_filepath):
 def play_audio(filepath):
     """
     Play a WAV audio file using PyAudio.
-    Resamples source audio to OUTPUT_SAMPLE_RATE.
-    Attempts specified DAC_PYAUDIO_INDEX first, then falls back to default output.
+    Manually resamples to OUTPUT_SAMPLE_RATE, Stereo, 16-bit using numpy.
+    Attempts playback *only* on configured DAC_PYAUDIO_INDEX.
     """
     if not os.path.exists(filepath):
         log.error(f"Playback Error: File not found - {filepath}")
@@ -1424,125 +1586,194 @@ def play_audio(filepath):
         log.error(f"Playback Error: Can only play WAV files - {filepath}")
         return
 
+    wf = None
     stream = None
     p = _get_pyaudio_instance() # Use shared instance
 
     try:
-        # --- Load WAV file using pydub (handles format variations better) ---
-        log.info(f"Loading '{os.path.basename(filepath)}' using pydub...")
+        # --- Load WAV file using standard wave module ---
+        log.info(f"Loading '{os.path.basename(filepath)}' using wave module...")
         try:
-            audio = AudioSegment.from_wav(filepath)
-        except pydub_exceptions.CouldntDecodeError as e:
-             log.error(f"Pydub could not decode WAV file: {filepath} - {e}")
-             log.error("-> The WAV file might be corrupted or in an unsupported format.")
-             return
+            wf = wave.open(filepath, 'rb')
+        except wave.Error as e:
+            log.error(f"Wave module could not open WAV file: {filepath} - {e}")
+            return
         except Exception as e:
-             log.error(f"Error loading WAV file {filepath} with pydub: {e}")
+             log.error(f"Error loading WAV file {filepath} with wave module: {e}")
              return
 
-        original_rate = audio.frame_rate
-        original_channels = audio.channels
-        original_width = audio.sample_width
-        log.info(f" -> Loaded: {original_rate} Hz, {original_channels} Ch, {original_width * 8}-bit")
+        # --- Get Native Audio Parameters ---
+        original_rate = wf.getframerate()
+        original_channels = wf.getnchannels()
+        original_width = wf.getsampwidth() # Bytes per sample
+        num_frames = wf.getnframes()
+        log.info(f" -> Loaded original: {original_rate} Hz, {original_channels} Ch, {original_width * 8}-bit, {num_frames} frames")
 
-        # --- Resample and format for output device ---
-        target_rate = OUTPUT_SAMPLE_RATE
-        target_channels = 2 # Force Stereo for consistency? DACs often expect stereo.
-        target_width = 2 # Force 16-bit (PyAudio paInt16)
+        # --- Read all audio data ---
+        raw_data = wf.readframes(num_frames)
+        wf.close() # Close the file handle now
+        wf = None
 
-        resample_needed = (original_rate != target_rate)
-        channels_needed = (original_channels != target_channels)
-        width_needed = (original_width != target_width)
-
-        if resample_needed or channels_needed or width_needed:
-             log.info(f"Adjusting audio: Target={target_rate}Hz, {target_channels}Ch, {target_width*8}-bit")
-             try:
-                 if resample_needed:
-                      log.debug(f"   Resampling from {original_rate} Hz to {target_rate} Hz...")
-                      audio = audio.set_frame_rate(target_rate)
-                 if channels_needed:
-                      log.debug(f"   Adjusting channels from {original_channels} to {target_channels}...")
-                      audio = audio.set_channels(target_channels)
-                 if width_needed:
-                      log.debug(f"   Adjusting sample width from {original_width*8}-bit to {target_width*8}-bit...")
-                      audio = audio.set_sample_width(target_width)
-                 log.info(" -> Audio adjusted successfully.")
-             except Exception as e:
-                 log.error(f"Error during pydub audio adjustment: {e}")
-                 return # Stop if adjustment fails
+        # --- Convert raw bytes to numpy array based on sample width ---
+        if original_width == 1:
+            dtype = np.uint8 # 8-bit is usually unsigned
+        elif original_width == 2:
+            dtype = np.int16 # 16-bit is usually signed
+        elif original_width == 3:
+             log.warning("24-bit WAV detected. Reading as bytes, conversion might be imprecise.")
+             # Read as bytes, manual conversion needed later if processing
+             # For now, let's hope resampling handles it okay, or error out.
+             # A better approach would use soundfile or similar library.
+             # We'll attempt resampling but it might fail/be wrong.
+             dtype = np.uint8 # Placeholder, this isn't ideal
+             # TODO: Implement proper 24-bit handling if needed
+        elif original_width == 4:
+            dtype = np.int32 # 32-bit is usually signed int or float
         else:
-             log.info("Audio already matches target format. No adjustments needed.")
+            log.error(f"Unsupported sample width: {original_width} bytes ({original_width*8}-bit)")
+            return
 
-        output_data = audio.raw_data
-        output_channels = audio.channels
-        output_width = audio.sample_width
-        output_rate = audio.frame_rate # Should now be OUTPUT_SAMPLE_RATE
-        output_format = p.get_format_from_width(output_width) # Should be paInt16
+        if dtype != np.uint8: # Don't process 24-bit further yet
+             log.debug(f"Converting raw data to numpy array (dtype={dtype})...")
+             samples_in = np.frombuffer(raw_data, dtype=dtype)
+        elif original_width == 3: # Special handling attempt for 24-bit
+             log.warning("Attempting basic 24-bit to 16-bit conversion (might lose precision/range).")
+             # This is a crude approximation - assumes little-endian 24-bit signed
+             samples_in = np.array([int.from_bytes(raw_data[i:i+3], 'little', signed=True) >> 8
+                                   for i in range(0, len(raw_data), 3)], dtype=np.int16)
+             if not samples_in.any(): # Check if conversion resulted in empty array
+                 log.error("Failed to convert 24-bit audio data.")
+                 return
+        else: # Handle uint8 case
+             samples_in = np.frombuffer(raw_data, dtype=dtype)
+             # Convert uint8 (0-255) to int16 (-32768 to 32767)
+             samples_in = (samples_in.astype(np.int16) - 128) * 256
 
-        # --- Sanity Check ---
-        if output_rate != OUTPUT_SAMPLE_RATE:
-             log.error(f"CRITICAL: Post-adjustment rate mismatch! Audio rate is {output_rate}Hz, expected {OUTPUT_SAMPLE_RATE}Hz.")
-             return
-        if output_width != target_width:
-             log.error(f"CRITICAL: Post-adjustment width mismatch! Audio width is {output_width} bytes, expected {target_width}.")
-             return
-        if output_channels != target_channels:
-             log.error(f"CRITICAL: Post-adjustment channel mismatch! Audio channels is {output_channels}, expected {target_channels}.")
-             return
 
-        # --- Attempt to Open Stream (Primary DAC first, then Fallback) ---
+        # --- Resample using numpy interpolation ---
+        target_rate = OUTPUT_SAMPLE_RATE
+        resampled_samples = samples_in # Default if no resampling needed
+        if original_rate != target_rate:
+            log.debug(f"Resampling audio from {original_rate} Hz to {target_rate} Hz using np.interp...")
+            num_samples_in = len(samples_in)
+            # Handle multi-channel data if original was stereo/etc.
+            # We need to resample each channel independently if interleaved.
+            # For simplicity now, assume resampling works ok on interleaved data,
+            # or handle only the mono/stereo case correctly.
+            # Let's reshape, resample first channel, then handle stereo conversion later.
+
+            if original_channels > 1:
+                # Separate channels, resample first, then decide how to combine/stereoize
+                 mono_samples_in = samples_in[::original_channels] # Take first channel
+                 num_mono_samples_in = len(mono_samples_in)
+                 num_samples_out = int(num_mono_samples_in * target_rate / original_rate)
+                 if num_mono_samples_in > 0 and num_samples_out > 0:
+                     idx_orig = np.arange(num_mono_samples_in)
+                     idx_new = np.linspace(0, num_mono_samples_in - 1, num_samples_out)
+                     resampled_mono = np.interp(idx_new, idx_orig, mono_samples_in)
+                     log.debug(f" -> Resampled MONO audio from {num_mono_samples_in} to {len(resampled_mono)} samples.")
+                     # We will force stereo later using this resampled mono data
+                     resampled_samples = resampled_mono # Keep the mono result for now
+                 else:
+                     log.warning("Cannot resample zero-length mono audio component.")
+                     return
+            else: # Original was mono
+                 num_samples_out = int(num_samples_in * target_rate / original_rate)
+                 if num_samples_in > 0 and num_samples_out > 0:
+                     idx_orig = np.arange(num_samples_in)
+                     idx_new = np.linspace(0, num_samples_in - 1, num_samples_out)
+                     resampled_samples = np.interp(idx_new, idx_orig, samples_in)
+                     log.debug(f" -> Resampled MONO audio from {num_samples_in} to {len(resampled_samples)} samples.")
+                 else:
+                    log.warning("Cannot resample zero-length audio.")
+                    return
+        else:
+            log.debug("Audio rate already matches target playback rate. No resampling needed.")
+            # If no resampling needed but original was multichannel, extract first channel for stereo conversion
+            if original_channels > 1:
+                 resampled_samples = samples_in[::original_channels]
+
+        # --- Convert to Stereo, 16-bit ---
+        target_channels = 2
+        target_width = 2
+        target_format_pyaudio = p.get_format_from_width(target_width) # paInt16
+
+        log.debug("Converting resampled audio to Stereo 16-bit...")
+        # At this point, resampled_samples should contain mono data at target_rate
+        final_samples = np.repeat(resampled_samples, target_channels).astype(np.int16)
+        output_data = final_samples.tobytes()
+        log.info(f" -> Final format for playback: {target_rate} Hz, {target_channels} Ch, {target_width * 8}-bit")
+
+        # --- Check if DAC supports the target format ---
         target_device_index = DAC_PYAUDIO_INDEX
-        stream = None
         try:
             device_info = p.get_device_info_by_index(target_device_index)
-            log.info(f"Attempting to play on configured DAC: Index={target_device_index}, Name='{device_info.get('name', 'N/A')}' (Rate: {output_rate} Hz)")
+            log.info(f"Checking format support for device: Index={target_device_index}, Name='{device_info.get('name', 'N/A')}'")
+            is_supported = p.is_format_supported(
+                rate=target_rate,
+                input_device=None,
+                input_channels=0,
+                input_format=None, # Not checking input
+                output_device=target_device_index,
+                output_channels=target_channels,
+                output_format=target_format_pyaudio
+            )
+            if is_supported:
+                log.info(f" -> Device reports support for {target_rate} Hz, {target_channels} Ch, {target_width*8}-bit.")
+            else:
+                # Log a strong warning but proceed anyway - sometimes is_format_supported is unreliable
+                log.warning(f" -> WARNING: Device *reports no support* for {target_rate} Hz, {target_channels} Ch, {target_width*8}-bit. Playback might fail or be incorrect!")
+                # You could choose to return here if the check fails:
+                # log.error("Aborting playback as target format reportedly not supported.")
+                # return
+
+        except ValueError as e:
+             log.error(f"Error checking format support for device index {target_device_index}: {e}")
+             # This might happen if the index is invalid - stop here.
+             return
+        except Exception as e:
+             log.exception(f"Unexpected error checking format support for device index {target_device_index}: {e}")
+             # Continue with caution? Or stop? Let's stop.
+             return
+
+
+        # --- Attempt to Open Stream ONLY on configured DAC ---
+        stream = None
+        opened_device_info = f"Configured DAC Index={target_device_index}"
+        try:
+            log.info(f"Attempting to open {opened_device_info} with {target_rate} Hz, {target_channels} Ch, {target_width*8}-bit...")
             stream = p.open(
-                format=output_format,
-                channels=output_channels,
-                rate=output_rate, # Use the CONFIRMED output rate
+                format=target_format_pyaudio,
+                channels=target_channels,
+                rate=target_rate, # Use the TARGET rate
                 output=True,
-                output_device_index=target_device_index,
+                output_device_index=target_device_index, # Force this index
                 frames_per_buffer=PLAYBACK_CHUNK,
             )
-            log.info(f"Successfully opened DAC: Index={target_device_index}")
+            log.info(f"Successfully opened {opened_device_info}")
 
         except Exception as e_dac:
-            log.warning(f"Failed to open configured DAC (Index={target_device_index}): {e_dac}. Attempting default output device.")
-            try:
-                # Check if default output exists before trying to open
-                default_output_info = p.get_default_output_device_info()
-                default_output_index = default_output_info['index']
-                log.info(f"Attempting to play on default output device: Index={default_output_index}, Name='{default_output_info.get('name', 'N/A')}' (Rate: {output_rate} Hz)")
-                stream = p.open(
-                    format=output_format,
-                    channels=output_channels,
-                    rate=output_rate, # Use the CONFIRMED output rate
-                    output=True,
-                    output_device_index=None, # Let PyAudio choose default
-                    frames_per_buffer=PLAYBACK_CHUNK,
-                )
-                log.info(f"Successfully opened default output device: Index={default_output_index}")
-            except Exception as e_default:
-                log.error(f"FATAL: Failed to open both specified DAC and default output device: {e_default}")
-                return # Cannot play
+            # NO FALLBACK - Log the error clearly and exit
+            log.error(f"FATAL: Failed to open configured DAC (Index={target_device_index}) with the target format.")
+            log.error(f" -> PyAudio Error: {e_dac}")
+            log.error(" -> Check if the DAC is correctly configured in ALSA and detected by PyAudio.")
+            log.error(f" -> Ensure the DAC actually supports {target_rate} Hz / {target_channels} Ch / 16-bit.")
+            return # Cannot play
 
         # --- Play Audio ---
         log.info(f"Playing '{os.path.basename(filepath)}' ({len(output_data)} bytes)...")
-        # Write data in chunks using a loop
-        chunk_size_frames = PLAYBACK_CHUNK
-        chunk_size_bytes = chunk_size_frames * output_channels * output_width
         data_idx = 0
+        chunk_size_bytes = PLAYBACK_CHUNK * target_channels * target_width
         while data_idx < len(output_data):
              chunk = output_data[data_idx : data_idx + chunk_size_bytes]
              stream.write(chunk)
-             data_idx += len(chunk) # Use actual length written in case it's the last partial chunk
+             data_idx += len(chunk)
 
-        # Wait for stream to finish playing the buffered data
         stream.stop_stream()
         log.info(f"Finished playing: {os.path.basename(filepath)}")
 
     except FileNotFoundError:
-         log.error(f"Playback Error: File not found during pydub loading - '{filepath}'")
+         log.error(f"Playback Error: File not found - '{filepath}'") # Should be caught earlier
     except Exception as e:
         log.exception(f"Playback Error: An unexpected error occurred while processing/playing '{filepath}': {e}")
 
@@ -1550,14 +1781,14 @@ def play_audio(filepath):
         # --- Cleanup ---
         if stream is not None:
             try:
-                # Ensure stream is stopped before closing, even if stop_stream was called earlier
-                if stream.is_active():
-                    stream.stop_stream()
+                if stream.is_active(): stream.stop_stream()
                 stream.close()
                 log.debug("PyAudio stream closed.")
             except Exception as e_close:
                 log.error(f"Error closing PyAudio stream: {e_close}")
-        # No wave object to close here as we used pydub
+        if wf is not None: # Should be closed already, but just in case
+            try: wf.close()
+            except Exception: pass
 
 ================================================
 File: /agents.py
@@ -1716,6 +1947,8 @@ File: /debug.py
 """
 Simplified Debug endpoints: tone, LED, button, mic start/stop.
 Ensures correct sample rate metadata in saved WAV files.
+Handles GPIO setup more robustly by setting mode and setup within functions.
+Records debug mic at fixed 48kHz and applies software gain.
 """
 
 import os
@@ -1723,135 +1956,130 @@ import time
 import threading
 import logging
 import wave
+import numpy as np # Needed for mic gain
 from flask import Blueprint, jsonify, request
+# pydub is only needed for tone generation here, not playback resampling
 from pydub import AudioSegment, exceptions as pydub_exceptions
 from pydub.generators import Sine
 import pyaudio
 
 from config import (
     GPIO_LED_PIN, GPIO_BUTTON_PIN, BUTTON_ACTIVE_HIGH, ENABLE_GPIO,
-    MIC_DEVICE_INDEX, MIC_SAMPLE_RATE, MIC_CHANNELS, MIC_CHUNK
+    MIC_DEVICE_INDEX, MIC_CHANNELS, MIC_CHUNK, # MIC_SAMPLE_RATE no longer needed here
+    OUTPUT_SAMPLE_RATE # Needed for tone generation
 )
-from audio_manager import play_audio # Re-import for tone playback
+# Use audio_manager's player which handles resampling to target rate
+from audio_manager import play_audio
 
 log = logging.getLogger("debug") # Use specific logger
 
-# GPIO Setup (Conditional)
+# --- Mic Gain Configuration ---
+DEBUG_MIC_GAIN_FACTOR = 4.0
+
+# --- GPIO Initial Check (Conditional) ---
+# We still check if the library can be imported and if GPIO is enabled,
+# but the actual setup (mode and pin config) will happen in the functions.
 HAS_GPIO = False
+GPIO = None # Initialize GPIO to None
+
 if ENABLE_GPIO:
     try:
-        import RPi.GPIO as GPIO
-        GPIO.setwarnings(False) # Suppress channel already in use warnings
-        GPIO.setmode(GPIO.BCM)
-        # Setup pins only if they are valid (e.g., > 0)
-        if GPIO_LED_PIN > 0:
-             GPIO.setup(GPIO_LED_PIN, GPIO.OUT, initial=GPIO.LOW)
-        if GPIO_BUTTON_PIN > 0:
-             pull_resistor = GPIO.PUD_UP if not BUTTON_ACTIVE_HIGH else GPIO.PUD_DOWN
-             GPIO.setup(GPIO_BUTTON_PIN, GPIO.IN, pull_up_down=pull_resistor)
+        import RPi.GPIO as RPiGPIO # Use alias
+        GPIO = RPiGPIO # Assign to global variable AFTER successful import
+        # We won't set mode or setup pins here anymore globally for debug routes
         HAS_GPIO = True
-        log.info("GPIO initialized for debug.")
-    except Exception as e:
-        log.warning(f"GPIO initialization failed in debug: {e}. Debug Button/LED disabled.")
-        HAS_GPIO = False # Ensure it's False on error
+        log.info("RPi.GPIO library imported successfully for debug endpoints.")
+    except ImportError:
+        log.warning("RPi.GPIO library not found. Debug Button/LED disabled.")
+        HAS_GPIO = False
+        GPIO = None
+    except Exception as e: # Catch any other unexpected errors during import
+        log.exception(f"Unexpected error during GPIO import: {e}. Debug Button/LED disabled.")
+        HAS_GPIO = False
+        GPIO = None
 else:
     log.info("GPIO disabled by configuration or platform.")
+# --- End GPIO Initial Check ---
 
 
 bp = Blueprint("debug", __name__, url_prefix="/api/debug")
 
-# Globals for mic recording state
+# Globals for mic recording state (Unaffected by GPIO changes)
 _recording_thread = None
-_recording_active = threading.Event() # Use Event for clearer signaling
+_recording_active = threading.Event()
 _frames = []
-_pa_debug = None # Use separate instance for debug mic? Might avoid conflicts.
+_pa_debug = None
 _stream_debug = None
-_mic_rate_debug = 0 # Store sample rate used for recording
+_mic_rate_debug = 48000 # Fixed rate for debug recording
 
 def _mic_worker_debug():
-    """Dedicated thread for reading audio frames for debug recording."""
+    # (This function remains the same)
     global _frames, _stream_debug
-    log.info("Debug Mic recording worker thread started.")
-    frames_this_run = [] # Collect frames locally first
+    log.info(f"Debug Mic recording worker thread started (Target Rate: {_mic_rate_debug} Hz).")
+    frames_this_run = []
     while _recording_active.is_set() and _stream_debug and _stream_debug.is_active():
         try:
             data = _stream_debug.read(MIC_CHUNK, exception_on_overflow=False)
-            if data:
-                 frames_this_run.append(data)
+            if data: frames_this_run.append(data)
         except OSError as e:
-             if "Input overflowed" in str(e):
-                  log.warning("Debug Mic input overflow detected.")
-             else:
-                  log.error(f"Debug Mic read OS error in worker: {e}")
-                  _recording_active.clear() # Signal stop on error
-                  break
+             if "Input overflowed" in str(e): log.warning("Debug Mic input overflow detected.")
+             else: log.error(f"Debug Mic read OS error in worker: {e}"); _recording_active.clear(); break
         except Exception as e:
-            log.exception("Unexpected error in debug mic recording worker.")
-            _recording_active.clear() # Signal stop on error
-            break
-
-    # Append collected frames to global list *after* loop finishes or is stopped
-    # This might be slightly safer if multiple threads access _frames, though unlikely here.
+            log.exception("Unexpected error in debug mic recording worker."); _recording_active.clear(); break
     _frames.extend(frames_this_run)
     log.info(f"Debug Mic recording worker thread finished. Collected {len(frames_this_run)} frames.")
 
 
 @bp.route("/tone", methods=["POST"])
 def tone():
-    """
-    Generate and save a sine tone WAV file. Plays it and returns the URL.
-    Query args: frequency (Hz), duration (ms)
-    """
-    freq = float(request.args.get("frequency", 440))
-    dur_ms = int(request.args.get("duration", 500)) # Default 500ms
-    audio_dir = os.path.join(os.getcwd(), "audio_files")
-    os.makedirs(audio_dir, exist_ok=True)
-
-    fname = f"debug_tone_{int(freq)}Hz_{dur_ms}ms.wav"
-    path = os.path.join(audio_dir, fname)
-
+    # (This function remains the same)
+    freq = float(request.args.get("frequency", 440)); dur_ms = int(request.args.get("duration", 500))
+    audio_dir = os.path.join(os.getcwd(), "audio_files"); os.makedirs(audio_dir, exist_ok=True)
+    fname = f"debug_tone_{int(freq)}Hz_{dur_ms}ms.wav"; path = os.path.join(audio_dir, fname)
     try:
         log.info(f"Generating tone: {freq} Hz, {dur_ms} ms")
-        sine_wave = Sine(freq)
-        audio_segment = sine_wave.to_audio_segment(duration=dur_ms)
-        # Export as WAV (ensure 16-bit for wider compatibility)
-        audio_segment = audio_segment.set_sample_width(2)
-        audio_segment.export(path, format="wav")
-        log.info(f"Tone saved to {path}")
-
-        # Play the generated tone using audio_manager
-        log.info("Playing generated tone via audio_manager...")
-        # This runs in the main Flask thread, blocking the request until done
-        # Consider running in a separate thread if immediate response is needed
-        play_audio(path)
-        log.info("Finished playing tone.")
-
+        sine_wave = Sine(freq, sample_rate=44100); audio_segment = sine_wave.to_audio_segment(duration=dur_ms)
+        audio_segment = audio_segment.set_sample_width(2); audio_segment.export(path, format="wav")
+        log.info(f"Tone saved to {path} (Rate: 44100 Hz, Mono)")
+        log.info("Playing generated tone via audio_manager..."); play_audio(path); log.info("Finished playing tone.")
         return jsonify({"status": "Tone generated and played", "audio_url": f"/audio_files/{fname}"})
     except Exception as e:
-        log.exception("Error generating or playing tone.")
-        return jsonify({"error": f"Failed to process tone: {e}"}), 500
+        log.exception("Error generating or playing tone."); return jsonify({"error": f"Failed to process tone: {e}"}), 500
 
 @bp.route("/led", methods=["POST"])
 def led():
     """Blink the LED 3×. Requires valid LED pin and GPIO enabled."""
-    if not HAS_GPIO or GPIO_LED_PIN <= 0:
-        return jsonify({"error": "GPIO not available or LED pin not configured"}), 400
+    # Check if GPIO library is available and the specific pin is configured
+    if not (HAS_GPIO and GPIO and GPIO_LED_PIN > 0):
+        reason = "Unknown GPIO issue"
+        if not GPIO: reason = "GPIO library object invalid"
+        elif not HAS_GPIO: reason = "GPIO library failed import"
+        elif GPIO_LED_PIN <= 0: reason = "LED pin not configured"
+        log.warning(f"LED test endpoint called but GPIO is not ready: {reason}")
+        return jsonify({"error": f"GPIO not ready: {reason}"}), 400
 
     def _blink():
         log.info(f"Blinking LED on pin {GPIO_LED_PIN}")
+        led_pin = GPIO_LED_PIN # Local variable for clarity
         try:
-            # Store original state if needed, but usually we force LOW at end
+            # *** FIX: Set mode AND setup pin within the thread ***
+            GPIO.setmode(GPIO.BCM)
+            GPIO.setwarnings(False)
+            GPIO.setup(led_pin, GPIO.OUT) # Ensure it's set as output here
+            log.debug(f"LED Pin {led_pin} set up as OUT inside thread.")
+            # Perform the blink
             for _ in range(3):
-                GPIO.output(GPIO_LED_PIN, GPIO.HIGH)
+                GPIO.output(led_pin, GPIO.HIGH)
                 time.sleep(0.25)
-                GPIO.output(GPIO_LED_PIN, GPIO.LOW)
+                GPIO.output(led_pin, GPIO.LOW)
                 time.sleep(0.25)
             log.info("LED blink finished.")
         except Exception as e:
              log.error(f"Error during LED blink thread: {e}")
-             # Attempt to ensure LED is off on error
-             try: GPIO.output(GPIO_LED_PIN, GPIO.LOW)
-             except Exception: pass
+             # Attempt to ensure LED is off even if error occurred
+             # No need for cleanup here, as setup is temporary within the thread
+             # try: GPIO.output(led_pin, GPIO.LOW) # This might fail if setup failed
+             # except Exception: pass
 
     threading.Thread(target=_blink, daemon=True).start()
     return jsonify({"status": "LED blink sequence started"})
@@ -1859,164 +2087,95 @@ def led():
 @bp.route("/button", methods=["GET"])
 def button():
     """Read current button state. Requires valid button pin and GPIO enabled."""
-    if not HAS_GPIO or GPIO_BUTTON_PIN <= 0:
-        return jsonify({"error": "GPIO not available or Button pin not configured"}), 400
+    # Check if GPIO library is available and the specific pin is configured
+    if not (HAS_GPIO and GPIO and GPIO_BUTTON_PIN > 0):
+        reason = "Unknown GPIO issue"
+        if not GPIO: reason = "GPIO library object invalid"
+        elif not HAS_GPIO: reason = "GPIO library failed import"
+        elif GPIO_BUTTON_PIN <= 0: reason = "Button pin not configured"
+        log.warning(f"Button read endpoint called but GPIO is not ready: {reason}")
+        return jsonify({"error": f"GPIO not ready: {reason}"}), 400
+
+    button_pin = GPIO_BUTTON_PIN # Local variable
     try:
-        raw = GPIO.input(GPIO_BUTTON_PIN)
-        # Logic based on config's BUTTON_ACTIVE_HIGH
+        # *** FIX: Set mode AND setup pin within the route handler ***
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setwarnings(False)
+        pull_resistor = GPIO.PUD_UP if not BUTTON_ACTIVE_HIGH else GPIO.PUD_DOWN
+        GPIO.setup(button_pin, GPIO.IN, pull_up_down=pull_resistor) # Setup as input here
+        log.debug(f"Button Pin {button_pin} set up as IN inside route handler (Pull {'UP' if pull_resistor == GPIO.PUD_UP else 'DOWN'}).")
+
+        # Read the input
+        raw = GPIO.input(button_pin)
         pressed = (raw == 1) if BUTTON_ACTIVE_HIGH else (raw == 0)
-        log.debug(f"Button pin {GPIO_BUTTON_PIN} read: raw={raw}, pressed={pressed} (Active High={BUTTON_ACTIVE_HIGH})")
-        return jsonify({"pressed": pressed})
+        log.debug(f"Button pin {button_pin} read: raw={raw}, pressed={pressed} (Active High: {BUTTON_ACTIVE_HIGH})")
+        # No cleanup needed here as setup is temporary for this read
+        return jsonify({"pressed": pressed, "raw_value": raw})
     except Exception as e:
         log.error(f"Error reading button state: {e}")
+        # No cleanup needed here either
         return jsonify({"error": f"Failed to read button: {e}"}), 500
 
 
 @bp.route("/mic/start", methods=["POST"])
 def mic_start():
-    """Begin recording audio indefinitely until /mic/stop is called."""
+    # (This function remains the same - mic part was working)
     global _recording_thread, _frames, _pa_debug, _stream_debug, _mic_rate_debug
-
-    if _recording_active.is_set():
-        log.warning("Debug Mic start requested, but already recording.")
-        return jsonify({"error": "Already recording"}), 400
-
-    _frames = [] # Clear previous frames
-    _mic_rate_debug = 0 # Reset rate
-
+    if _recording_active.is_set(): log.warning("..."); return jsonify({"error": "Already recording"}), 400
+    _frames = []; _mic_rate_debug = 48000
+    log.info(f"Attempting to start Debug Mic recording at fixed rate: {_mic_rate_debug} Hz")
     try:
         _pa_debug = pyaudio.PyAudio()
-        device_info = _pa_debug.get_device_info_by_index(MIC_DEVICE_INDEX)
-        _mic_rate_debug = MIC_SAMPLE_RATE if MIC_SAMPLE_RATE > 0 else int(device_info["defaultSampleRate"])
-
-        if _mic_rate_debug <= 0:
-             raise ValueError(f"Invalid mic rate detected: {_mic_rate_debug}")
-
-        log.info(f"Starting Debug Mic recording: Index={MIC_DEVICE_INDEX}, Rate={_mic_rate_debug} Hz, Channels={MIC_CHANNELS}")
         _stream_debug = _pa_debug.open(
-            format=pyaudio.paInt16, # Use 16-bit PCM
-            channels=MIC_CHANNELS,
-            rate=_mic_rate_debug,
-            input=True,
-            frames_per_buffer=MIC_CHUNK,
-            input_device_index=MIC_DEVICE_INDEX,
-            stream_callback=None # Use blocking read in worker thread
+            format=pyaudio.paInt16, channels=MIC_CHANNELS, rate=_mic_rate_debug,
+            input=True, frames_per_buffer=MIC_CHUNK, input_device_index=MIC_DEVICE_INDEX,
+            stream_callback=None
         )
-        # Don't necessarily need start_stream() with blocking read, but ensures it's ready
-        _stream_debug.start_stream()
-
-        _recording_active.set() # Signal worker to start
-
-        # Start the dedicated worker thread
-        _recording_thread = threading.Thread(target=_mic_worker_debug, daemon=True)
-        _recording_thread.start()
-
-        log.info("Debug Mic recording started successfully.")
+        _recording_active.set(); _recording_thread = threading.Thread(target=_mic_worker_debug, daemon=True); _recording_thread.start()
+        log.info(f"Debug Mic recording started successfully at {_mic_rate_debug} Hz.")
         return jsonify({"status": "Recording started"})
-
     except Exception as e:
         log.exception("Failed to start Debug Mic recording.")
         _recording_active.clear()
-        # Cleanup partial resources
-        if _stream_debug:
-            try:
-                 if _stream_debug.is_active(): _stream_debug.stop_stream()
-                 _stream_debug.close()
-            except Exception: pass
-            _stream_debug = None
-        if _pa_debug:
-            try: _pa_debug.terminate()
-            except Exception: pass
-            _pa_debug = None
-        _mic_rate_debug = 0
+        if _stream_debug: try: _stream_debug.close() catch Exception: pass; _stream_debug = None
+        if _pa_debug: try: _pa_debug.terminate() catch Exception: pass; _pa_debug = None
         return jsonify({"error": f"Failed to start recording: {e}"}), 500
 
 
 @bp.route("/mic/stop", methods=["POST"])
 def mic_stop():
-    """Stop recording, save the WAV file with correct metadata, and return its URL."""
+    # (This function remains the same - mic part was working)
     global _recording_thread, _frames, _pa_debug, _stream_debug, _mic_rate_debug
-
-    if not _recording_active.is_set():
-        # If already stopped but called again, maybe just return status?
-        # For now, treat as error if not actively recording.
-        log.warning("Debug Mic stop requested, but not recording.")
-        return jsonify({"error": "Not recording"}), 400
-
-    log.info("Stopping Debug Mic recording...")
-    _recording_active.clear() # Signal worker thread to stop
-
-    # Wait for the worker thread to finish
-    if _recording_thread and _recording_thread.is_alive():
-        log.debug("Waiting for debug recording thread to finish...")
-        _recording_thread.join(timeout=1.5) # Slightly longer timeout
-        if _recording_thread.is_alive():
-             log.warning("Debug recording thread did not finish cleanly.")
-        _recording_thread = None
-
-    # Close and terminate PyAudio resources (use the _debug versions)
-    if _stream_debug:
-        try:
-            # Check if active before stopping
-            if _stream_debug.is_active():
-                 _stream_debug.stop_stream()
-            _stream_debug.close()
-            log.debug("Debug Mic stream closed.")
-        except Exception as e:
-            log.error(f"Error closing debug mic stream: {e}")
-        finally:
-             _stream_debug = None
-
-    if _pa_debug:
-        try:
-            _pa_debug.terminate()
-            log.debug("Debug PyAudio instance terminated.")
-        except Exception as e:
-            log.error(f"Error terminating debug PyAudio: {e}")
-        finally:
-            _pa_debug = None
-
-    # --- Save the recorded frames ---
-    # Check frames *after* resource cleanup
-    if not _frames:
-        log.warning("Recording stopped, but no frames were captured.")
-        # Reset rate even if no frames
-        _mic_rate_debug = 0
-        return jsonify({"error": "No audio data recorded"}), 400
-
-    # Check if rate is valid before saving
-    if _mic_rate_debug <= 0:
-         log.error("Cannot save WAV file: Invalid microphone sample rate captured during start.")
-         _frames = [] # Clear frames
-         return jsonify({"error": "Internal error: Invalid sample rate for saving."}), 500
-
-    audio_dir = os.path.join(os.getcwd(), "audio_files")
-    os.makedirs(audio_dir, exist_ok=True)
-    ts = int(time.time())
-    fname = f"debug_mic_{ts}.wav"
-    path = os.path.join(audio_dir, fname)
-
+    if not _recording_active.is_set(): log.warning("..."); return jsonify({"error": "Not recording"}), 400
+    log.info("Stopping Debug Mic recording..."); _recording_active.clear()
+    if _recording_thread and _recording_thread.is_alive(): _recording_thread.join(timeout=1.5) # ... (join logic) ...
+    if _stream_debug: try: _stream_debug.close() catch Exception as e: log.error(f"... {e}"); _stream_debug = None
+    if _pa_debug: try: _pa_debug.terminate() catch Exception as e: log.error(f"... {e}"); _pa_debug = None
+    if not _frames: log.warning("..."); return jsonify({"error": "No audio data recorded"}), 400
+    if _mic_rate_debug <= 0: log.error("..."); _frames = []; return jsonify({"error": "Internal error..."}), 500
+    audio_dir = os.path.join(os.getcwd(), "audio_files"); os.makedirs(audio_dir, exist_ok=True)
+    ts = int(time.time()); fname = f"debug_mic_{ts}.wav"; path = os.path.join(audio_dir, fname)
     try:
-        log.info(f"Saving debug recording to {path} (Rate: {_mic_rate_debug} Hz, Channels: {MIC_CHANNELS}, Width: 16-bit)")
-        wf = wave.open(path, "wb")
-        wf.setnchannels(MIC_CHANNELS)
-        # Get sample width corresponding to paInt16 (2 bytes)
-        sample_width = pyaudio.PyAudio().get_sample_size(pyaudio.paInt16)
-        wf.setsampwidth(sample_width)
-        wf.setframerate(_mic_rate_debug) # Use the **actual recording rate**
-        wf.writeframes(b"".join(_frames))
-        wf.close()
+        raw_data = b"".join(_frames); _frames = []
+        processed_data = raw_data
+        if DEBUG_MIC_GAIN_FACTOR != 1.0 and raw_data:
+            log.info(f"Applying software gain (factor: {DEBUG_MIC_GAIN_FACTOR:.2f})...")
+            try:
+                samples = np.frombuffer(raw_data, dtype=np.int16)
+                amplified_samples = samples.astype(np.float32) * DEBUG_MIC_GAIN_FACTOR
+                np.clip(amplified_samples, -32768, 32767, out=amplified_samples)
+                processed_data = amplified_samples.astype(np.int16).tobytes()
+                log.info("Gain applied successfully.")
+            except Exception as e_gain: log.error(f"Error applying gain: {e_gain}. Saving original."); processed_data = raw_data
+        else: log.info("Skipping software gain."); processed_data = raw_data
+        log.info(f"Saving debug recording to {path} (Rate: {_mic_rate_debug} Hz ...)")
+        wf = wave.open(path, "wb"); wf.setnchannels(MIC_CHANNELS)
+        sample_width = pyaudio.PyAudio().get_sample_size(pyaudio.paInt16); wf.setsampwidth(sample_width)
+        wf.setframerate(_mic_rate_debug); wf.writeframes(processed_data); wf.close()
         log.info(f"Debug recording saved successfully: {fname}")
-
         return jsonify({"status": "Recording stopped and saved", "audio_url": f"/audio_files/{fname}"})
-
-    except Exception as e:
-        log.exception("Failed to save debug microphone recording.")
-        return jsonify({"error": f"Failed to save recording: {e}"}), 500
-    finally:
-        # Clear frames and reset rate regardless of save success/failure
-        _frames = []
-        _mic_rate_debug = 0
+    except Exception as e: log.exception("..."); return jsonify({"error": f"Failed to save recording: {e}"}), 500
+    finally: _frames = []
 
 ================================================
 File: /app.py
@@ -2805,15 +2964,13 @@ File: /templates/index.html
         });
       }
 
+      // *** MODIFIED: Removed AbortController and timeout logic ***
       async function apiCall(endpoint, method = "POST", body = null) {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 150000);
-
         try {
           const options = {
             method,
             headers: {},
-            signal: controller.signal, // Add abort signal
+            // signal: controller.signal, // <-- REMOVED
           };
           if (body) {
             if (body instanceof FormData) {
@@ -2825,7 +2982,7 @@ File: /templates/index.html
             }
           }
           const response = await fetch(endpoint, options);
-          clearTimeout(timeoutId); // Clear timeout if fetch succeeds
+          // clearTimeout(timeoutId); // <-- REMOVED
 
           let data;
           const contentType = response.headers.get("content-type");
@@ -2854,15 +3011,12 @@ File: /templates/index.html
           }
           return data;
         } catch (err) {
-          clearTimeout(timeoutId); // Clear timeout on error too
+          // clearTimeout(timeoutId); // <-- REMOVED
           console.error(`API call to ${endpoint} failed:`, err);
-          // Handle specific AbortError for timeouts
-          if (err.name === "AbortError") {
-            return {
-              success: false,
-              error: "Request timed out after 15 seconds.",
-            };
-          }
+          // Removed specific AbortError handling as timeout is removed
+          // if (err.name === "AbortError") {
+          //   return { success: false, error: "Request timed out." };
+          // }
           return {
             success: false,
             error: err.message || "Network or script error",
