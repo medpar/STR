@@ -1,3 +1,6 @@
+<!-- ================================================ -->
+<!-- File: /templates/index.html                      -->
+<!-- ================================================ -->
 <!DOCTYPE html>
 <html lang="es">
   <head>
@@ -172,6 +175,11 @@
         min-height: 42px; /* Minimum height like buttons */
         height: auto; /* Allow textarea to grow */
       }
+      /* Styling for realtime text display */
+      .bot .bot-text {
+        /* Target only the text part inside bot bubble */
+        min-height: 1.5em; /* Ensure some min height while loading */
+      }
     </style>
   </head>
   <body class="bg-gray-100 text-gray-900 font-sans antialiased">
@@ -184,9 +192,10 @@
 
       <!-- Tabs -->
       <nav class="flex justify-center border-b border-gray-300 pb-0" id="tabs">
-        <button data-tab="tts" class="tab active">Texto a Voz</button>
+        <button data-tab="tts" class="tab">Texto a Voz</button>
         <button data-tab="agent" class="tab">Agente</button>
-        <button data-tab="realtime" class="tab">Conversación</button>
+        <button data-tab="realtime" class="tab active">Conversación</button>
+        <!-- Default Active Tab -->
         <button data-tab="pdf" class="tab">Documentos</button>
         <button data-tab="debug" class="tab">Debug</button>
       </nav>
@@ -194,12 +203,11 @@
       <!-- Panels Container -->
       <div class="bg-white rounded-lg shadow-lg overflow-hidden">
         <!-- Texto a Voz -->
-        <section id="panel-tts" class="panel chat-container">
+        <section id="panel-tts" class="panel chat-container hidden">
           <div id="ttsFeed" class="chat-history"></div>
           <div
             class="chat-input-area flex flex-col sm:flex-row gap-3 items-start sm:items-center"
           >
-            <!-- Changed alignment -->
             <textarea
               id="ttsInput"
               class="input-box"
@@ -207,7 +215,6 @@
               rows="1"
             ></textarea>
             <div class="flex gap-2 flex-shrink-0 mt-2 sm:mt-0">
-              <!-- Added margin top for small screens -->
               <button id="ttsSend" class="btn btn-primary">Enviar</button>
               <button id="ttsClear" class="btn btn-secondary">Limpiar</button>
             </div>
@@ -220,7 +227,6 @@
           <div
             class="chat-input-area flex flex-col sm:flex-row gap-3 items-start sm:items-center"
           >
-            <!-- Changed alignment -->
             <textarea
               id="agentInput"
               class="input-box"
@@ -228,7 +234,6 @@
               rows="1"
             ></textarea>
             <div class="flex gap-2 flex-shrink-0 mt-2 sm:mt-0">
-              <!-- Added margin top for small screens -->
               <button id="agentSend" class="btn btn-primary">Enviar</button>
               <button id="agentClear" class="btn btn-secondary">Limpiar</button>
             </div>
@@ -236,13 +241,16 @@
         </section>
 
         <!-- Conversación -->
-        <section id="panel-realtime" class="panel chat-container hidden">
+        <!-- Default Visible Panel -->
+        <section id="panel-realtime" class="panel chat-container">
           <div id="realtimeFeed" class="chat-history">
+            <!-- Status will be dynamically updated -->
             <p id="realtimeStatus" class="status-message">Initializing...</p>
           </div>
           <div class="chat-input-area flex flex-col gap-4">
             <div class="flex flex-wrap gap-3 justify-center">
-              <button id="startTalking" class="btn btn-primary">
+              <button id="startTalking" class="btn btn-primary" disabled>
+                <!-- Initially disabled -->
                 🎙️ Start Mic
               </button>
               <button id="stopTalking" class="btn btn-secondary" disabled>
@@ -256,10 +264,12 @@
                 id="realtimeText"
                 class="input-box"
                 placeholder="Enviar texto al aire (Enter para enviar)"
+                disabled
               />
               <button
                 id="realtimeTextSend"
                 class="btn btn-primary flex-shrink-0"
+                disabled
               >
                 Enviar
               </button>
@@ -375,10 +385,18 @@
     </div>
 
     <script>
-      const socket = io("/realtime", { transports: ["websocket"] });
+      // Use 'const' for variables that aren't reassigned, 'let' for those that are.
       const el = (sel) => document.querySelector(sel);
       const elAll = (sel) => document.querySelectorAll(sel);
 
+      // --- Global State ---
+      let currentBotBubble = null; // Track the bubble being updated by text_delta
+
+      // --- WebSocket Connection ---
+      // Ensure the transport is websocket for realtime
+      const socket = io("/realtime", { transports: ["websocket"] });
+
+      // --- UI Helper Functions ---
       function showToast(message, type = "info") {
         console.log(`TOAST (${type}): ${message}`);
         const toastContainer = el("#toast-container") || createToastContainer();
@@ -391,76 +409,69 @@
             ? "bg-green-600"
             : "bg-blue-600"
         }`;
-        toast.style.opacity = "0"; // Start transparent
-        toast.style.transform = "translateY(20px)"; // Start lower
-
-        toastContainer.insertBefore(toast, toastContainer.firstChild); // Add new toasts at the top
-
-        // Animate in
+        toast.style.opacity = "0";
+        toast.style.transform = "translateY(20px)";
+        toastContainer.insertBefore(toast, toastContainer.firstChild);
         requestAnimationFrame(() => {
           toast.style.opacity = "1";
           toast.style.transform = "translateY(0)";
         });
-
-        // Auto-remove
         setTimeout(() => {
           toast.style.opacity = "0";
-          toast.style.transform = "translateY(-20px)"; // Animate out upwards
+          toast.style.transform = "translateY(-20px)";
           toast.addEventListener("transitionend", () => toast.remove());
         }, 3500);
       }
       function createToastContainer() {
         const container = document.createElement("div");
         container.id = "toast-container";
-        container.className = "fixed bottom-5 right-5 z-50 w-64"; // Position & size
+        container.className = "fixed bottom-5 right-5 z-50 w-64";
         document.body.appendChild(container);
         return container;
       }
 
-      const feedClear = (feedSel, statusSel = null, initialMsg = "") => {
+      function feedClear(feedSel, statusSel = null, initialMsg = "") {
         const feed = el(feedSel);
         if (!feed) return;
-        feed.innerHTML = "";
-        if (statusSel) {
-          const statusElement = el(statusSel);
-          if (statusElement) {
-            // Check if the status element is *supposed* to be inside the feed
-            const isChild = statusElement.closest(feedSel);
-            if (isChild) {
-              // Recreate it if it's meant to be inside
-              const p = document.createElement("p");
-              p.id = statusElement.id; // Keep the original ID
-              p.className = "status-message";
-              p.textContent = initialMsg;
-              feed.appendChild(p);
-            } else {
-              // Update it if it's outside the feed
-              statusElement.textContent = initialMsg;
-            }
-          }
+        feed.innerHTML = ""; // Clear previous content
+        currentBotBubble = null; // Reset current bot bubble tracking for this feed
+
+        // Re-add status message if provided
+        if (statusSel && initialMsg) {
+          const statusP = document.createElement("p");
+          statusP.id = statusSel.substring(1); // Remove # for ID
+          statusP.className = "status-message";
+          statusP.textContent = initialMsg;
+          feed.appendChild(statusP);
         }
-      };
+      }
 
       function appendBubble(feedSel, text, who, audioUrl = null) {
         const feed = el(feedSel);
         if (!feed) return;
-        // Remove initial status message if present
-        const statusMsg = feed.querySelector(".status-message");
-        if (statusMsg) statusMsg.remove();
+
+        // Remove initial status message ONLY if it exists and we're adding the first bubble
+        if (
+          feed.children.length === 1 &&
+          feed.children[0].classList.contains("status-message")
+        ) {
+          feed.children[0].remove();
+        }
 
         const bubbleDiv = document.createElement("div");
-        bubbleDiv.className = `bubble ${who} flex flex-col`; // Flex column for text + audio
-        const textNode = document.createElement("p");
-        textNode.textContent = text;
-        bubbleDiv.appendChild(textNode);
+        bubbleDiv.className = `bubble ${who} flex flex-col`;
+        const textP = document.createElement("p");
+        textP.className = `${who}-text`; // Add class for specific styling/selection
+        textP.textContent = text;
+        bubbleDiv.appendChild(textP);
 
         if (audioUrl) {
           try {
             const audio = document.createElement("audio");
             audio.controls = true;
-            audio.preload = "metadata"; // Don't load full audio until played
+            audio.preload = "metadata";
             audio.src = audioUrl;
-            audio.className = "mt-2 w-full"; // Style the audio player
+            audio.className = "mt-2 w-full";
             bubbleDiv.appendChild(audio);
           } catch (e) {
             console.error("Error creating audio element:", e);
@@ -471,23 +482,31 @@
           }
         }
         feed.appendChild(bubbleDiv);
-        // Scroll to bottom smoothly after the element is added
+
+        // If this is a bot bubble, track it for potential delta updates
+        if (who === "bot") {
+          currentBotBubble = textP; // Track the text paragraph element
+        } else {
+          currentBotBubble = null; // Clear tracking if user bubble added
+        }
+
+        // Scroll to bottom
         requestAnimationFrame(() => {
           feed.scrollTo({ top: feed.scrollHeight, behavior: "smooth" });
         });
+
+        return textP; // Return the text element for potential updates
       }
 
-      // *** MODIFIED: Removed AbortController and timeout logic ***
+      // --- API Call Function (No changes needed) ---
       async function apiCall(endpoint, method = "POST", body = null) {
         try {
           const options = {
             method,
             headers: {},
-            // signal: controller.signal, // <-- REMOVED
           };
           if (body) {
             if (body instanceof FormData) {
-              // Let browser set Content-Type for FormData
               options.body = body;
             } else {
               options.headers["Content-Type"] = "application/json";
@@ -495,27 +514,22 @@
             }
           }
           const response = await fetch(endpoint, options);
-          // clearTimeout(timeoutId); // <-- REMOVED
 
           let data;
           const contentType = response.headers.get("content-type");
           if (contentType && contentType.includes("application/json")) {
             data = await response.json();
           } else {
-            // Handle non-JSON responses (e.g., plain text errors)
             const text = await response.text();
-            // Synthesize a JSON-like structure for consistency
             data = {
               success: response.ok,
               status_text: text || response.statusText,
             };
             if (!response.ok) {
-              data.error = data.status_text; // Assign text as error message
+              data.error = data.status_text;
             }
           }
-          // Ensure 'success' property reflects HTTP status
           if (data.success === undefined) data.success = response.ok;
-          // Standardize error message reporting
           if (!response.ok && !data.error) {
             data.error =
               data.message ||
@@ -524,12 +538,7 @@
           }
           return data;
         } catch (err) {
-          // clearTimeout(timeoutId); // <-- REMOVED
           console.error(`API call to ${endpoint} failed:`, err);
-          // Removed specific AbortError handling as timeout is removed
-          // if (err.name === "AbortError") {
-          //   return { success: false, error: "Request timed out." };
-          // }
           return {
             success: false,
             error: err.message || "Network or script error",
@@ -537,7 +546,7 @@
         }
       }
 
-      /* Tabs */
+      // --- Tab Switching Logic ---
       const tabs = elAll("#tabs .tab");
       const panels = elAll(".panel");
       tabs.forEach((tab) => {
@@ -548,67 +557,68 @@
           panels.forEach((p) => {
             p.classList.toggle("hidden", p.id !== targetPanelId);
           });
+          // Reset current bubble tracking when switching tabs
+          if (tab.dataset.tab !== "realtime") {
+            currentBotBubble = null;
+          }
         };
       });
 
       /* ====================================================== */
       /*                Input Handling & Submission             */
       /* ====================================================== */
-
       function setupEnterKeySubmission(inputId, buttonId, isTextarea = false) {
         const inputElement = el(inputId);
         const buttonElement = el(buttonId);
-        if (!inputElement || !buttonElement) {
-          console.warn(`Setup failed: Cannot find ${inputId} or ${buttonId}`);
-          return;
-        }
+        if (!inputElement || !buttonElement) return;
 
         inputElement.addEventListener("keydown", (event) => {
-          if (event.key === "Enter") {
+          if (event.key === "Enter" && !buttonElement.disabled) {
+            // Check if button is enabled
             if (isTextarea) {
-              // For textareas, only submit if Shift is NOT pressed
               if (!event.shiftKey) {
-                event.preventDefault(); // Prevent newline
-                buttonElement.click(); // Trigger button click
+                event.preventDefault();
+                buttonElement.click();
               }
-              // If Shift is pressed, allow default newline behavior
             } else {
-              // For regular inputs, always submit on Enter
-              event.preventDefault(); // Prevent potential form submission if wrapped
-              buttonElement.click(); // Trigger button click
+              event.preventDefault();
+              buttonElement.click();
             }
           }
         });
 
-        // Auto-resize textarea height
         if (isTextarea) {
           inputElement.addEventListener("input", () => {
-            inputElement.style.height = "auto"; // Reset height
-            inputElement.style.height = `${inputElement.scrollHeight}px`; // Set to scroll height
+            inputElement.style.height = "auto";
+            inputElement.style.height = `${inputElement.scrollHeight}px`;
           });
+          // Initial resize on load
+          inputElement.style.height = "auto";
+          inputElement.style.height = `${inputElement.scrollHeight}px`;
         }
       }
 
-      // --- Setup Enter Key for all relevant inputs ---
-      setupEnterKeySubmission("#ttsInput", "#ttsSend", true); // Textarea
-      setupEnterKeySubmission("#agentInput", "#agentSend", true); // Textarea
-      setupEnterKeySubmission("#realtimeText", "#realtimeTextSend", false); // Input
-      setupEnterKeySubmission("#pdfQuestion", "#pdfAsk", false); // Input
+      // Setup Enter Key for relevant inputs
+      setupEnterKeySubmission("#ttsInput", "#ttsSend", true);
+      setupEnterKeySubmission("#agentInput", "#agentSend", true);
+      setupEnterKeySubmission("#realtimeText", "#realtimeTextSend", false);
+      setupEnterKeySubmission("#pdfQuestion", "#pdfAsk", false);
 
       /* ====================================================== */
       /*                      Tab Logic                         */
       /* ====================================================== */
 
-      /* TTS */
+      /* --- TTS --- */
       const ttsInput = el("#ttsInput"),
         ttsSendBtn = el("#ttsSend"),
         ttsFeed = "#ttsFeed";
       ttsSendBtn.onclick = async () => {
+        /* ... (no changes needed) ... */
         const txt = ttsInput.value.trim();
         if (!txt) return;
         appendBubble(ttsFeed, txt, "user");
         ttsInput.value = "";
-        ttsInput.style.height = "auto"; // Reset height after sending
+        ttsInput.style.height = "auto";
         ttsInput.focus();
         ttsSendBtn.disabled = true;
         const res = await apiCall("/api/tts", "POST", { text: txt });
@@ -626,16 +636,17 @@
       };
       el("#ttsClear").onclick = () => feedClear(ttsFeed);
 
-      /* Agent */
+      /* --- Agent --- */
       const agentInput = el("#agentInput"),
         agentSendBtn = el("#agentSend"),
         agentFeed = "#agentFeed";
       agentSendBtn.onclick = async () => {
+        /* ... (no changes needed) ... */
         const q = agentInput.value.trim();
         if (!q) return;
         appendBubble(agentFeed, q, "user");
         agentInput.value = "";
-        agentInput.style.height = "auto"; // Reset height after sending
+        agentInput.style.height = "auto";
         agentInput.focus();
         agentSendBtn.disabled = true;
         const res = await apiCall("/api/agent", "POST", { query: q });
@@ -653,81 +664,148 @@
       };
       el("#agentClear").onclick = () => feedClear(agentFeed);
 
-      /* Realtime */
+      /* --- Realtime (MODIFIED) --- */
       const startBtn = el("#startTalking"),
         stopBtn = el("#stopTalking"),
         rtStatus = el("#realtimeStatus"),
         realtimeFeed = "#realtimeFeed",
         rtText = el("#realtimeText"),
-        rtTextSend = el("#realtimeTextSend");
-      startBtn.onclick = () => socket.emit("start_talking");
+        rtTextSend = el("#realtimeTextSend"),
+        rtClearBtn = el("#rtClear");
+
+      startBtn.onclick = () => {
+        currentBotBubble = null; // Reset bubble tracking on new recording
+        socket.emit("start_talking");
+      };
       stopBtn.onclick = () => socket.emit("stop_talking");
-      el("#rtClear").onclick = () =>
-        feedClear(realtimeFeed, "#realtimeStatus", "Ready");
+      rtClearBtn.onclick = () => {
+        // Clear feed and reset status based on connection state
+        const currentStatus = rtStatus.textContent;
+        feedClear(
+          realtimeFeed,
+          "#realtimeStatus",
+          currentStatus.includes("Error") ||
+            currentStatus.includes("Disconnected")
+            ? currentStatus
+            : "Ready."
+        );
+      };
       rtTextSend.onclick = () => {
         const m = rtText.value.trim();
         if (!m) return;
-        appendBubble(realtimeFeed, m, "user");
+        appendBubble(realtimeFeed, m, "user"); // Add user message
+        currentBotBubble = null; // Expect a new bot response, clear tracking
         rtText.value = "";
         rtText.focus();
         socket.emit("send_text", { text: m });
       };
-      // Socket.IO listeners for realtime
+
+      // -- Socket.IO listeners for Realtime (MODIFIED) --
       socket.on("status", (d) => {
-        rtStatus.textContent = d.message;
-        if (d.message === "Recording…") {
+        const msg = d.message || "Status unknown";
+        rtStatus.textContent = msg;
+        console.log("Status received:", msg); // Debug log
+
+        // Enable/disable buttons based on status
+        if (
+          msg.includes("Error") ||
+          msg.includes("Disconnected") ||
+          msg.includes("unavailable")
+        ) {
           startBtn.disabled = true;
-          stopBtn.disabled = false;
-          rtTextSend.disabled = true; // Disable text send while mic is active? Optional.
-        } else if (d.message === "Ready" || d.message.startsWith("Error:")) {
+          stopBtn.disabled = true;
+          rtText.disabled = true;
+          rtTextSend.disabled = true;
+        } else if (msg === "Connecting...") {
+          startBtn.disabled = true;
+          stopBtn.disabled = true;
+          rtText.disabled = true;
+          rtTextSend.disabled = true;
+        } else if (msg === "Ready.") {
           startBtn.disabled = false;
           stopBtn.disabled = true;
+          rtText.disabled = false;
           rtTextSend.disabled = false;
-        } else {
-          // Processing... state
+          currentBotBubble = null; // Ensure bubble tracking is cleared when ready
+        } else if (msg === "Recording...") {
           startBtn.disabled = true;
-          stopBtn.disabled = true;
-          rtTextSend.disabled = false; // Allow sending text while processing
-        }
-        // Handle specific error case
-        if (d.message.includes("Realtime Error: Service unavailable")) {
-          startBtn.disabled = true;
-          stopBtn.disabled = true;
+          stopBtn.disabled = false;
+          rtText.disabled = true; // Disable text input while recording
           rtTextSend.disabled = true;
+          currentBotBubble = null; // Recording started, no active bot bubble yet
+        } else if (msg === "Processing...") {
+          startBtn.disabled = true; // Can't start while processing
+          stopBtn.disabled = true; // Can't stop while already processing
+          rtText.disabled = false; // Allow sending text while processing audio? Maybe disable.
+          rtTextSend.disabled = false; // Let's disable for simplicity.
+          rtText.disabled = true;
+          rtTextSend.disabled = true;
+        } else {
+          // Default state (e.g., Connected) - similar to Ready
+          startBtn.disabled = false;
+          stopBtn.disabled = true;
+          rtText.disabled = false;
+          rtTextSend.disabled = false;
         }
       });
-      socket.on("broadcast_text", (d) => {
-        appendBubble(realtimeFeed, d.message, "bot");
-        rtStatus.textContent = "Ready"; // Set status back to ready after broadcast
-        startBtn.disabled = false;
-        stopBtn.disabled = true;
-        rtTextSend.disabled = false;
+
+      socket.on("text_delta", (d) => {
+        const delta = d.delta || "";
+        // console.log("Delta:", delta); // Debug log for delta
+
+        if (!currentBotBubble) {
+          // If no current bubble, create a new one
+          console.log("Creating new bot bubble for delta.");
+          // Add a placeholder or the first delta piece
+          appendBubble(realtimeFeed, delta, "bot");
+          // currentBotBubble is now set by appendBubble
+        } else {
+          // Append delta to the existing tracked bubble's text content
+          currentBotBubble.textContent += delta;
+          // Scroll to bottom as text grows
+          const feed = el(realtimeFeed);
+          if (feed) {
+            requestAnimationFrame(() => {
+              feed.scrollTo({ top: feed.scrollHeight, behavior: "auto" }); // Use auto scroll during delta for performance
+            });
+          }
+        }
       });
+
+      // No broadcast_text event anymore, audio is played by server triggering playback
+      // socket.on("broadcast_text", ...) -> REMOVED
+
       socket.on("connect", () => {
         console.log("Realtime WebSocket connected.");
-        rtStatus.textContent = "Connected. Ready.";
-        startBtn.disabled = false;
-        stopBtn.disabled = true;
-        rtTextSend.disabled = false;
+        // Status update will be sent by server on connect
+        // rtStatus.textContent = "Connected. Ready.";
+        // startBtn.disabled = false;
+        // stopBtn.disabled = true;
+        // rtText.disabled = false;
+        // rtTextSend.disabled = false;
       });
       socket.on("disconnect", (reason) => {
         console.log(`Realtime WebSocket disconnected: ${reason}`);
         rtStatus.textContent = "Disconnected. Check server.";
         startBtn.disabled = true;
         stopBtn.disabled = true;
+        rtText.disabled = true;
         rtTextSend.disabled = true;
         showToast("Realtime connection lost.", "error");
+        currentBotBubble = null; // Reset tracking on disconnect
       });
       socket.on("connect_error", (err) => {
         console.error(`Realtime connection error: ${err.message}`);
         rtStatus.textContent = `Connection Error: ${err.message}`;
         startBtn.disabled = true;
         stopBtn.disabled = true;
+        rtText.disabled = true;
         rtTextSend.disabled = true;
         showToast(`Realtime connection error: ${err.message}`, "error");
+        currentBotBubble = null; // Reset tracking on error
       });
 
-      /* PDF */
+      /* --- PDF --- */
       let currentPDF = null;
       const pdfFile = el("#pdfFile"),
         pdfAskBtn = el("#pdfAsk"),
@@ -737,12 +815,13 @@
         pdfStatus = el("#pdfUploadStatus"),
         pdfQA = el("#pdfQA");
       pdfFile.onchange = async () => {
+        /* ... (no changes needed) ... */
         const file = pdfFile.files[0];
         if (!file) return;
         pdfStatus.textContent = "⏳ Subiendo e indexando PDF…";
         pdfQA.classList.add("hidden");
         pdfAskBtn.disabled = true;
-        pdfFile.disabled = true; // Disable input while uploading
+        pdfFile.disabled = true;
         currentPDF = null;
         const fd = new FormData();
         fd.append("file", file);
@@ -753,20 +832,21 @@
           pdfStatus.textContent = txt;
           pdfQA.classList.remove("hidden");
           pdfAskBtn.disabled = false;
-          pdfQuestion.value = ""; // Clear question field
+          pdfQuestion.value = "";
           pdfQuestion.focus();
-          feedClear(pdfFeed, "#pdfUploadStatus", txt); // Clear chat, keep status
+          feedClear(pdfFeed, "#pdfUploadStatus", txt);
           showToast(`PDF "${currentPDF}" cargado`, "success");
         } else {
           pdfStatus.textContent = `⚠️ Error al cargar PDF: ${
             res.error || "Unknown"
           }`;
-          pdfFile.value = ""; // Clear file input
+          pdfFile.value = "";
           showToast(`Error cargando PDF: ${res.error || "Unknown"}`, "error");
         }
-        pdfFile.disabled = false; // Re-enable input
+        pdfFile.disabled = false;
       };
       pdfAskBtn.onclick = async () => {
+        /* ... (no changes needed) ... */
         const q = pdfQuestion.value.trim();
         if (!q || !currentPDF) {
           showToast(
@@ -799,17 +879,18 @@
         pdfAskBtn.disabled = false;
       };
       pdfClearBtn.onclick = () => {
+        /* ... (no changes needed) ... */
         const txt = currentPDF
           ? `✅ PDF listo: ${currentPDF}`
           : "Elige un PDF para cargar…";
         feedClear(pdfFeed, "#pdfUploadStatus", txt);
       };
 
-      /* Debug Controls */
+      /* --- Debug Controls --- */
       const debugStatus = el("#debugStatus");
-
       // Tone
       el("#tonePlay").onclick = async () => {
+        /* ... (no changes needed) ... */
         const f = +el("#toneFreq").value || 440;
         const d = +el("#toneDur").value || 500;
         debugStatus.textContent = "Generando y reproduciendo tono...";
@@ -825,9 +906,9 @@
           debugStatus.textContent = `Error con el tono: ${res.error}`;
         }
       };
-
       // LED
       el("#ledTest").onclick = async () => {
+        /* ... (no changes needed) ... */
         debugStatus.textContent = "Probando LED...";
         const res = await apiCall("/api/debug/led", "POST");
         if (res.success) {
@@ -838,9 +919,9 @@
           debugStatus.textContent = `Error de LED: ${res.error}`;
         }
       };
-
       // Button State
       el("#btnState").onclick = async () => {
+        /* ... (no changes needed) ... */
         debugStatus.textContent = "Leyendo botón...";
         const res = await apiCall("/api/debug/button", "GET");
         const btnResultSpan = el("#btnResult");
@@ -853,46 +934,43 @@
           debugStatus.textContent = `Error leyendo botón: ${res.error}`;
         }
       };
-
       // Mic Record Start/Stop
-      const micStartBtn = el("#micStart");
-      const micStopBtn = el("#micStop");
-      const micAudio = el("#micPlayback");
-      const micPlaybackStatus = el("#micPlaybackStatus");
-
+      const micStartBtn = el("#micStart"),
+        micStopBtn = el("#micStop"),
+        micAudio = el("#micPlayback"),
+        micPlaybackStatus = el("#micPlaybackStatus");
       micStartBtn.onclick = async () => {
+        /* ... (no changes needed) ... */
         debugStatus.textContent = "Iniciando grabación...";
         micPlaybackStatus.textContent = "";
-        micAudio.style.display = "none"; // Hide player
-        micAudio.src = ""; // Clear previous src
-
+        micAudio.style.display = "none";
+        micAudio.src = "";
         micStartBtn.disabled = true;
         const res = await apiCall("/api/debug/mic/start", "POST");
         if (res.success) {
-          micStopBtn.disabled = false; // Enable stop button ONLY on success
+          micStopBtn.disabled = false;
           showToast("Grabación iniciada", "info");
           debugStatus.textContent = "⏺️ Grabando...";
         } else {
-          micStartBtn.disabled = false; // Re-enable start on error
+          micStartBtn.disabled = false;
           showToast(`Error al iniciar grabación: ${res.error}`, "error");
           debugStatus.textContent = `Error al iniciar: ${res.error}`;
         }
       };
-
       micStopBtn.onclick = async () => {
+        /* ... (no changes needed) ... */
         debugStatus.textContent = "Deteniendo grabación...";
-        micStopBtn.disabled = true; // Disable stop while processing
+        micStopBtn.disabled = true;
         const res = await apiCall("/api/debug/mic/stop", "POST");
         if (res.success && res.audio_url) {
           micAudio.src = res.audio_url;
-          micAudio.style.display = "block"; // Show player
+          micAudio.style.display = "block";
           micPlaybackStatus.textContent = `Grabación guardada: ${res.audio_url
             .split("/")
             .pop()}`;
           showToast("Grabación detenida y guardada", "success");
           debugStatus.textContent =
             "Grabación detenida. Lista para reproducir.";
-          // Optional: Auto-play -> micAudio.play();
         } else {
           micPlaybackStatus.textContent = `Error: ${
             res.error || "No se pudo guardar"
@@ -905,19 +983,22 @@
             res.error || "Unknown"
           }`;
         }
-        // Always re-enable start button after stop attempt
         micStartBtn.disabled = false;
       };
 
-      // Clear Debug Feed (Optional)
-      // You could add a clear button for the debug status messages if needed.
-      // el("#debugClear").onclick = () => {
-      //     debugStatus.textContent = "Herramientas de depuración";
-      //     el("#btnResult").textContent = "";
-      //     micPlaybackStatus.textContent = "";
-      //     micAudio.style.display = 'none';
-      //     micAudio.src = '';
-      // };
+      // --- Initial UI State ---
+      // Ensure the correct tab is shown on load
+      document.addEventListener("DOMContentLoaded", () => {
+        tabs.forEach((t) => t.classList.remove("active"));
+        panels.forEach((p) => p.classList.add("hidden"));
+        el('button[data-tab="realtime"]').classList.add("active");
+        el("#panel-realtime").classList.remove("hidden");
+
+        // Attempt initial connection status check if socket connected quickly
+        if (socket.connected) {
+          socket.emit("request_status"); // Or rely on server sending status on connect
+        }
+      });
     </script>
   </body>
 </html>
