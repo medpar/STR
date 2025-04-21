@@ -299,6 +299,7 @@ try:
             mic_detection_method += ": USB/Mic Name"
         else:
             # 2. Try PyAudio default input
+            ### ad
             try:
                 default_input_info = p.get_default_input_device_info()
                 final_mic_index = default_input_info['index']
@@ -477,6 +478,702 @@ else:
 log_config.info(f"Vector Store ID: {'Set' if VECTOR_STORE_ID else 'Not Set'}")
 log_config.info(f"OpenAI Models: QA={OPENAI_MODEL_FILE_QA}, Agent={OPENAI_MODEL_AGENT}, Realtime={OPENAI_MODEL_REALTIME}")
 log_config.info("--------------------")
+
+================================================
+File: /realtime.py
+================================================
+# ================================================
+# File: /realtime.py
+# ================================================
+#!/usr/bin/env python3
+"""
+Realtime transcription and response using OpenAI Realtime API.
+Based on the provided OpenAI example, integrated into the Flask app structure.
+Handles audio recording, WebSocket communication, and triggers callbacks for text/audio.
+**MODIFIED:** Records mic at NATIVE_MIC_RATE and resamples down to API_AUDIO_RATE.
+"""
+
+import asyncio
+import websockets
+import json
+import pyaudio
+import base64
+import logging
+import os
+import ssl
+import threading
+import time
+import queue
+import wave # For saving temporary audio files
+from datetime import datetime
+import numpy as np # Needed for resampling
+import resampy # Needed for resampling
+
+from config import (
+    OPENAI_MODEL_REALTIME,
+    MIC_DEVICE_INDEX,
+    MIC_CHUNK,
+    BUTTON_ACTIVE_HIGH
+)
+from audio_manager import play_audio, terminate_pyaudio_instance as terminate_audio_manager_pyaudio
+
+# Load API Key
+from dotenv import load_dotenv
+load_dotenv()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+log = logging.getLogger(__name__) # Use logger instance
+
+# --- Constants ---
+REALTIME_API_URL = "wss://api.openai.com/v1/realtime"
+NATIVE_MIC_RATE = 48000 # <<< Record microphone at this rate (as requested)
+API_AUDIO_RATE = 24000  # <<< Resample to this rate for OpenAI API
+AUDIO_CHANNELS = 1
+AUDIO_FORMAT = pyaudio.paInt16 # 16-bit PCM
+AUDIO_FORMAT_STR = "pcm16" # For session config
+# Calculate audio width based on format
+try:
+    _pa_temp = pyaudio.PyAudio()
+    AUDIO_WIDTH = _pa_temp.get_sample_size(AUDIO_FORMAT)
+    _pa_temp.terminate()
+except Exception as e:
+    log.warning(f"Could not get sample size from PyAudio, defaulting to 2: {e}")
+    AUDIO_WIDTH = 2 # Default for paInt16
+
+TEMP_AUDIO_DIR = os.path.join(os.path.dirname(__file__), "audio_files", "temp_realtime")
+os.makedirs(TEMP_AUDIO_DIR, exist_ok=True)
+
+class AudioHandler:
+    """
+    Handles audio input using PyAudio specifically for the RealtimeClient.
+    Records at the NATIVE_MIC_RATE (e.g., 48kHz).
+    Does NOT handle playback (delegated to audio_manager).
+    """
+    def __init__(self, device_index=None):
+        self.p = None
+        self.stream = None
+        self.device_index = device_index
+        self.chunk_size = MIC_CHUNK
+        self.format = AUDIO_FORMAT
+        self.channels = AUDIO_CHANNELS
+        self.native_rate = NATIVE_MIC_RATE # <<< Use native rate for opening stream
+        self._is_recording = False
+        self._lock = threading.Lock()
+        log.info(f"AudioHandler initialized for device index {self.device_index} (Native Rate: {self.native_rate} Hz)")
+
+    def _initialize_pyaudio(self):
+        with self._lock:
+            if self.p is None:
+                log.debug("Initializing PyAudio instance for AudioHandler.")
+                self.p = pyaudio.PyAudio()
+
+    def start_recording(self):
+        """Start the audio input stream at the native rate."""
+        self._initialize_pyaudio()
+        with self._lock:
+            if self._is_recording:
+                log.warning("Recording already active.")
+                return True
+            if self.stream is not None:
+                log.warning("Stream exists but not marked as recording. Closing existing stream.")
+                self._close_stream_safe()
+
+            # <<< Use self.native_rate here
+            log.info(f"Attempting to start audio stream (Device: {self.device_index}, Rate: {self.native_rate} Hz)")
+            try:
+                self.stream = self.p.open(
+                    format=self.format,
+                    channels=self.channels,
+                    rate=self.native_rate, # <<< Use native rate
+                    input=True,
+                    frames_per_buffer=self.chunk_size,
+                    input_device_index=self.device_index
+                )
+                self._is_recording = True
+                log.info("Audio input stream started successfully.")
+                return True
+            except OSError as e:
+                # Log specific PyAudio errors if possible
+                log.exception(f"PyAudio OSError opening stream on device {self.device_index} at {self.native_rate}Hz: {e}")
+                self.stream = None
+                self._is_recording = False
+                return False
+            except Exception as e:
+                log.exception(f"Failed to open audio input stream on device {self.device_index}: {e}")
+                self.stream = None
+                self._is_recording = False
+                return False
+
+    def stop_recording(self):
+        """Stop the audio input stream."""
+        with self._lock:
+            if not self._is_recording:
+                log.debug("Recording already stopped.")
+                return
+            self._close_stream_safe()
+            self._is_recording = False
+            log.info("Audio input stream stopped.")
+
+    def _close_stream_safe(self):
+        """Safely stop and close the PyAudio stream."""
+        if self.stream:
+            try:
+                if self.stream.is_active():
+                    self.stream.stop_stream()
+                self.stream.close()
+                log.debug("Audio stream closed.")
+            except Exception as e:
+                log.error(f"Error closing audio stream: {e}")
+            finally:
+                self.stream = None
+
+    def read_chunk(self):
+        """Read a single chunk of audio (at native rate) if recording."""
+        with self._lock:
+            if not self._is_recording or not self.stream or not self.stream.is_active():
+                return None
+            try:
+                data = self.stream.read(self.chunk_size, exception_on_overflow=False)
+                return data
+            except OSError as e:
+                if "Input overflowed" in str(e):
+                    log.warning("Audio input overflow detected.")
+                # Check for other common ALSA/Input errors
+                elif "Input/output error" in str(e) or "-9988" in str(e):
+                    log.error(f"Audio input I/O error: {e}. Stopping recording.")
+                    # Trigger stop cleanly from here if possible, or signal error state
+                    self._is_recording = False # Mark as stopped
+                    self._close_stream_safe()
+                    # How to notify RealtimeClient? Needs better error handling.
+                    return None
+                else:
+                    log.error(f"Error reading audio chunk: {e}")
+                return None
+            except Exception as e:
+                log.exception(f"Unexpected error reading audio chunk: {e}")
+                return None
+
+    def cleanup(self):
+        """Clean up resources by stopping the stream and terminating PyAudio."""
+        log.debug("Cleaning up AudioHandler resources.")
+        self.stop_recording()
+        with self._lock:
+            if self.p:
+                try:
+                    self.p.terminate()
+                    log.debug("PyAudio instance terminated for AudioHandler.")
+                except Exception as e:
+                    log.error(f"Error terminating PyAudio for AudioHandler: {e}")
+                finally:
+                    self.p = None
+
+
+class RealtimeClient:
+    """
+    Client for interacting with the OpenAI Realtime API via WebSocket.
+    Manages connection, event handling, and audio streaming using AudioHandler.
+    Uses asyncio for WebSocket communication running in a separate thread.
+    Communicates with the main Flask app via callbacks.
+    **MODIFIED:** Resamples audio from NATIVE_MIC_RATE to API_AUDIO_RATE before sending.
+    """
+    def __init__(self, instructions, voice, mic_index, on_text_delta, on_audio_chunk, on_response_done, on_status_update):
+        self.instructions = instructions
+        self.voice = voice
+        self.mic_index = mic_index
+        self.api_key = OPENAI_API_KEY
+        self.model = OPENAI_MODEL_REALTIME
+        self.url = f"{REALTIME_API_URL}?model={self.model}"
+
+        # Callbacks to Flask app
+        self.on_text_delta = on_text_delta
+        self.on_audio_chunk = on_audio_chunk
+        self.on_response_done = on_response_done
+        self.on_status_update = on_status_update
+
+        self.audio_handler = AudioHandler(device_index=self.mic_index)
+        self.ws = None
+        self.ssl_context = ssl.create_default_context()
+        self.ssl_context.check_hostname = False
+        self.ssl_context.verify_mode = ssl.CERT_NONE
+
+        self.loop = None
+        self._thread = None
+        self._running = threading.Event()
+        self._connected = threading.Event()
+        self._recording = threading.Event()
+        self._audio_sender_task = None
+        self._receive_task = None
+
+        # <<< Session config uses API rate for input/output specification
+        self.session_config = {
+            "modalities": ["audio", "text"],
+            "instructions": self.instructions,
+            "voice": self.voice,
+            "input_audio_format": AUDIO_FORMAT_STR,
+            "output_audio_format": AUDIO_FORMAT_STR,
+            #"input_audio_sampling_rate": API_AUDIO_RATE, # <<< Rate we SEND to API
+            #"output_audio_sampling_rate": API_AUDIO_RATE,# <<< Rate we RECEIVE from API
+            "turn_detection": None, # Manual turn detection
+            "input_audio_transcription": {
+                "model": "whisper-1" # Use default whisper
+            },
+            "temperature": 0.7 # Example temperature
+        }
+
+        if not self.api_key:
+            log.error("OPENAI_API_KEY not found in environment variables.")
+            self.on_status_update("Error: OpenAI API Key missing.")
+            raise ValueError("OpenAI API Key is required.")
+
+    # --- Public Methods (Thread-Safe) ---
+    # start_background_loop, stop_background_loop, start_talking, stop_talking, send_text
+    # ... (These methods remain unchanged) ...
+    def start_background_loop(self):
+        """Starts the asyncio event loop in a separate thread."""
+        if self._thread is not None and self._thread.is_alive():
+            log.warning("Background loop already running.")
+            return
+        log.info("Starting RealtimeClient background asyncio loop...")
+        self._running.set()
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread.start()
+
+    def stop_background_loop(self):
+        """Stops the asyncio event loop and cleans up."""
+        if not self._running.is_set():
+            log.info("Background loop already stopped.")
+            return
+        log.info("Stopping RealtimeClient background loop...")
+        self._running.clear() # Signal loop to stop
+
+        if self.loop and self.loop.is_running():
+            # Schedule cleanup task in the loop
+            # Ensure the future is awaited or handled if run_coroutine_threadsafe returns one
+            future = asyncio.run_coroutine_threadsafe(self._async_cleanup(), self.loop)
+            try:
+                future.result(timeout=5.0) # Wait for cleanup to finish with timeout
+            except TimeoutError:
+                log.warning("Timeout waiting for async cleanup task to finish.")
+            except Exception as e:
+                log.error(f"Error during async cleanup execution: {e}")
+
+
+        # Wait for the thread to finish
+        if self._thread is not None:
+            self._thread.join(timeout=5.0)
+            if self._thread.is_alive():
+                log.warning("Background loop thread did not exit cleanly.")
+            self._thread = None
+        log.info("RealtimeClient background loop stopped.")
+
+
+    def start_talking(self):
+        """Starts audio recording and streaming. (Called from Flask/GPIO thread)"""
+        if not self._running.is_set() or not self.loop:
+            log.error("Cannot start talking: background loop not running.")
+            self.on_status_update("Error: Realtime service not running.")
+            return
+        if not self._connected.is_set():
+             log.error("Cannot start talking: not connected to WebSocket.")
+             self.on_status_update("Error: Not connected.")
+             return
+        if self._recording.is_set():
+             log.warning("Already recording.")
+             return
+
+        log.info("Request received to start talking...")
+        self.on_status_update("Recording...")
+        # Schedule the async start logic in the client's event loop
+        asyncio.run_coroutine_threadsafe(self._async_start_talking(), self.loop)
+
+    def stop_talking(self):
+        """Stops audio recording/streaming and commits buffer. (Called from Flask/GPIO thread)"""
+        if not self._running.is_set() or not self.loop:
+            log.error("Cannot stop talking: background loop not running.")
+            return
+        if not self._recording.is_set():
+             log.warning("Not currently recording.")
+             return
+
+        log.info("Request received to stop talking...")
+        self.on_status_update("Processing...")
+        # Schedule the async stop logic in the client's event loop
+        asyncio.run_coroutine_threadsafe(self._async_stop_talking(), self.loop)
+
+    def send_text(self, text):
+        """Sends a text message. (Called from Flask thread)"""
+        if not self._running.is_set() or not self.loop:
+            log.error("Cannot send text: background loop not running.")
+            self.on_status_update("Error: Realtime service not running.")
+            return
+        if not self._connected.is_set():
+             log.error("Cannot send text: not connected to WebSocket.")
+             self.on_status_update("Error: Not connected.")
+             return
+        if self._recording.is_set():
+            log.warning("Cannot send text while recording audio.")
+            self.on_status_update("Error: Cannot send text while recording.")
+            return
+
+        log.info(f"Request received to send text: '{text[:50]}...'")
+        # Schedule the async send logic
+        asyncio.run_coroutine_threadsafe(self._async_send_text(text), self.loop)
+
+    # --- Internal Asyncio Methods (Run in background loop) ---
+
+    def _run_loop(self):
+        """The main function executed in the background thread."""
+        try:
+            self.loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self.loop)
+            self.loop.run_until_complete(self._main_async_logic())
+        except Exception as e:
+            log.exception("Exception in RealtimeClient background loop:")
+        finally:
+            if self.loop and self.loop.is_running():
+                # Close pending tasks before closing loop
+                tasks = asyncio.all_tasks(self.loop)
+                for task in tasks:
+                    task.cancel()
+                # Wait for tasks to cancel
+                async def gather_cancelled():
+                     await asyncio.gather(*tasks, return_exceptions=True)
+                try:
+                    self.loop.run_until_complete(gather_cancelled())
+                except Exception as ex_cancel:
+                    log.error(f"Error cancelling tasks during loop close: {ex_cancel}")
+
+                self.loop.close()
+            self.loop = None
+            log.info("RealtimeClient asyncio loop finished.")
+
+
+    async def _main_async_logic(self):
+        """Core asyncio logic: connect, receive, handle reconnections."""
+        while self._running.is_set():
+            try:
+                log.info("Attempting WebSocket connection...")
+                self.on_status_update("Connecting...")
+                headers = {
+                    "Authorization": f"Bearer {self.api_key}",
+                    "OpenAI-Beta": "realtime=v1"
+                }
+                async with websockets.connect(
+                    self.url,
+                    extra_headers=headers,
+                    ssl=self.ssl_context,
+                    open_timeout=10,
+                    close_timeout=10,
+                    ping_interval=20, # Add keepalive pings
+                    ping_timeout=10
+                ) as ws:
+                    self.ws = ws
+                    self._connected.set()
+                    log.info("WebSocket connected successfully.")
+                    self.on_status_update("Connected. Ready.")
+
+                    # Configure session
+                    await self._send_event({
+                        "type": "session.update",
+                        "session": self.session_config
+                    })
+                    log.info("Session configured.")
+
+                    await self._send_event({"type": "response.create"})
+                    log.debug("Sent initial response.create.")
+
+                    # Start receiving events
+                    self._receive_task = asyncio.create_task(self._receive_events())
+                    await self._receive_task # Keep connection alive
+
+            except websockets.exceptions.ConnectionClosedOK:
+                log.info("WebSocket connection closed normally.")
+            except websockets.exceptions.ConnectionClosedError as e:
+                log.error(f"WebSocket connection closed with error: {e.code} {e.reason}")
+            except ConnectionRefusedError:
+                 log.error("Connection refused. Check network or server status.")
+            except ssl.SSLError as e:
+                log.error(f"SSL Error during connection: {e}")
+            except asyncio.TimeoutError:
+                log.error("Connection attempt or ping timed out.")
+            except Exception as e:
+                log.exception("Unexpected error during WebSocket connection/reception:")
+
+            finally:
+                self.ws = None
+                self._connected.clear()
+                if self._recording.is_set():
+                    log.warning("Disconnected while recording was active. Forcing stop.")
+                    # Use run_coroutine_threadsafe if _main_async_logic might finish
+                    # while another thread calls stop_talking. But if it's only
+                    # called internally, direct await is fine.
+                    # Let's assume direct await is okay here.
+                    await self._async_stop_talking(force_stop=True)
+                if self._receive_task and not self._receive_task.done():
+                    self._receive_task.cancel()
+                self.on_status_update("Disconnected.")
+
+                if self._running.is_set():
+                    log.info("Attempting reconnect in 5 seconds...")
+                    await asyncio.sleep(5)
+                else:
+                    log.info("Shutdown signaled, not reconnecting.")
+
+
+    async def _send_event(self, event):
+        """Send an event to the WebSocket server (internal)."""
+        if self.ws and self._connected.is_set():
+            try:
+                await self.ws.send(json.dumps(event))
+                if event.get("type") != "input_audio_buffer.append":
+                     log.debug(f"Event sent - type: {event.get('type', 'N/A')}")
+            except websockets.exceptions.ConnectionClosed:
+                log.warning("Cannot send event, WebSocket connection closed.")
+                self._connected.clear()
+            except Exception as e:
+                log.exception(f"Error sending WebSocket event: {e}")
+        else:
+            log.warning("Cannot send event, WebSocket not connected.")
+
+    async def _receive_events(self):
+        """Continuously receive events from the WebSocket server."""
+        if not self.ws: return
+        try:
+            async for message in self.ws:
+                try:
+                    event = json.loads(message)
+                    await self._handle_event(event)
+                except json.JSONDecodeError:
+                    log.error(f"Failed to decode JSON message: {message}")
+                except Exception as e:
+                    log.exception("Error handling received event:")
+        except websockets.exceptions.ConnectionClosedOK:
+            log.info("Receive loop ended: WebSocket connection closed normally.")
+        except websockets.exceptions.ConnectionClosedError as e:
+            log.error(f"Receive loop ended: WebSocket connection closed with error: {e.code} {e.reason}")
+            self._connected.clear()
+        except asyncio.CancelledError:
+             log.info("Receive loop cancelled.")
+        except Exception as e:
+            log.exception("Unexpected error in receive loop:")
+            self._connected.clear()
+
+    async def _handle_event(self, event):
+        """Handle incoming events from the WebSocket server."""
+        event_type = event.get("type")
+
+        if event_type == "error":
+            error_msg = event.get("error", {}).get("message", "Unknown error")
+            log.error(f"Error event received: {error_msg}")
+            self.on_status_update(f"Error: {error_msg}")
+        elif event_type == "response.text.delta":
+            delta = event.get("delta", "")
+            self.on_text_delta(delta)
+        elif event_type == "response.audio.delta":
+            # Received audio is at API_AUDIO_RATE (24kHz)
+            audio_b64 = event.get("delta")
+            if audio_b64:
+                try:
+                    audio_data = base64.b64decode(audio_b64)
+                    self.on_audio_chunk(audio_data) # Pass 24kHz data to callback
+                except Exception as e:
+                    log.error(f"Error decoding audio delta: {e}")
+        elif event_type == "response.audio.done":
+            log.info("Audio response complete (at API rate).")
+            self.on_response_done() # Signal completion
+            if not self._recording.is_set():
+                self.on_status_update("Ready.")
+        elif event_type == "response.done":
+            log.debug("Response generation completed (text/other).")
+            self.on_response_done()
+            if not self._recording.is_set():
+                 self.on_status_update("Ready.")
+        # ... (other event types remain the same) ...
+        elif event_type == "conversation.item.created":
+            pass # Informational
+        elif event_type == "input_audio_buffer.speech_started":
+            log.debug("Server VAD: Speech started")
+        elif event_type == "input_audio_buffer.speech_stopped":
+            log.debug("Server VAD: Speech stopped")
+
+
+    async def _async_start_talking(self):
+        """Async logic to start recording and the sender task."""
+        if self._recording.is_set(): return
+
+        log.info("Async: Starting audio recording...")
+        if not self.audio_handler.start_recording(): # Tries to start at NATIVE_MIC_RATE
+             log.error("Async: Failed to start audio hardware.")
+             self.on_status_update("Error: Mic unavailable.")
+             return
+
+        self._recording.set()
+        # Start the task that reads, resamples, and sends audio chunks
+        self._audio_sender_task = asyncio.create_task(self._audio_sender_worker())
+        log.info("Async: Audio sender worker started.")
+
+    async def _async_stop_talking(self, force_stop=False):
+        """Async logic to stop recording, sender task, and commit buffer."""
+        if not self._recording.is_set() and not force_stop:
+             log.warning("Async: Stop requested but not recording.")
+             return
+
+        log.info("Async: Stopping audio recording...")
+        self._recording.clear() # Signal sender task to stop
+
+        if self._audio_sender_task and not self._audio_sender_task.done():
+            try:
+                log.debug("Async: Waiting for audio sender worker to finish...")
+                await asyncio.wait_for(self._audio_sender_task, timeout=1.0)
+                log.debug("Async: Audio sender worker finished.")
+            except asyncio.TimeoutError:
+                log.warning("Async: Timeout waiting for audio sender worker. Cancelling.")
+                self._audio_sender_task.cancel()
+            except asyncio.CancelledError:
+                 log.info("Async: Audio sender worker was cancelled.")
+            except Exception as e:
+                 log.exception("Async: Error waiting for audio sender task.")
+        self._audio_sender_task = None
+
+        self.audio_handler.stop_recording() # Stop hardware
+        log.debug("Async: Audio hardware stopped.")
+
+        if not force_stop and self._connected.is_set(): # Only commit if connected
+            await self._send_event({"type": "input_audio_buffer.commit"})
+            log.info("Async: Audio buffer committed.")
+            await self._send_event({"type": "response.create"})
+            log.info("Async: response.create sent after audio commit.")
+        elif force_stop:
+             log.warning("Async: Forced stop, buffer not committed.")
+             self.on_status_update("Ready.") # Update status after forced stop
+        elif not self._connected.is_set():
+            log.warning("Async: Cannot commit buffer, WebSocket not connected.")
+            self.on_status_update("Disconnected.") # Reflect disconnected state
+
+
+    async def _audio_sender_worker(self):
+        """Async task to continuously read, RESAMPLE, and send audio chunks."""
+        log.debug("Audio sender worker running (Resampling {} -> {} Hz)...".format(NATIVE_MIC_RATE, API_AUDIO_RATE))
+        resample_filter = 'kaiser_fast' # Or 'kaiser_best' for higher quality
+
+        while self._recording.is_set():
+            # 1. Read chunk at native rate
+            chunk_native = self.audio_handler.read_chunk()
+
+            if chunk_native:
+                try:
+                    # 2. Convert bytes to numpy array (int16)
+                    samples_native = np.frombuffer(chunk_native, dtype=np.int16)
+
+                    # 3. Resample using resampy
+                    samples_api_rate = resampy.resample(
+                        samples_native,
+                        sr_orig=NATIVE_MIC_RATE,
+                        sr_new=API_AUDIO_RATE,
+                        filter=resample_filter,
+                        axis=0 # Ensure correct axis for 1D array
+                    )
+
+                    # 4. Convert resampled numpy array (float) back to int16 bytes
+                    chunk_api_rate = samples_api_rate.astype(np.int16).tobytes()
+
+                    # 5. Encode the RESAMPLED chunk to base64
+                    base64_chunk = base64.b64encode(chunk_api_rate).decode('utf-8')
+
+                    # 6. Send the RESAMPLED chunk
+                    await self._send_event({
+                        "type": "input_audio_buffer.append",
+                        "audio": base64_chunk
+                    })
+                except Exception as e:
+                    log.exception(f"Error resampling/encoding/sending audio chunk: {e}")
+                    # Consider stopping on error?
+                    # self._recording.clear()
+                    # break
+            else:
+                # No chunk available (or error reading), sleep briefly
+                await asyncio.sleep(0.005)
+
+            # Yield control briefly
+            await asyncio.sleep(0.001)
+        log.debug("Audio sender worker finished.")
+
+
+    async def _async_send_text(self, text):
+        """Async logic to send text message."""
+        log.info(f"Async: Sending text: '{text[:50]}...'")
+        event = {
+            "type": "conversation.item.create",
+            "item": {
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": text
+                }]
+            }
+        }
+        await self._send_event(event)
+        await self._send_event({"type": "response.create"})
+        log.info("Async: Text sent and response.create requested.")
+        self.on_status_update("Processing...")
+
+    async def _async_cleanup(self):
+        """Async cleanup tasks to be run in the loop before stopping."""
+        log.info("Async: Cleaning up RealtimeClient...")
+        if self._recording.is_set():
+             await self._async_stop_talking(force_stop=True)
+
+        # Cancel tasks safely
+        tasks_to_cancel = [self._receive_task, self._audio_sender_task]
+        for task in tasks_to_cancel:
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task # Allow task to handle cancellation
+                except asyncio.CancelledError:
+                    log.debug(f"Task {task.get_name()} cancelled successfully.")
+                except Exception as e:
+                    log.error(f"Error during task cancellation ({task.get_name()}): {e}")
+
+        if self.ws:
+            try:
+                await self.ws.close()
+                log.info("Async: WebSocket closed.")
+            except Exception as e:
+                log.error(f"Async: Error closing WebSocket: {e}")
+            finally:
+                self.ws = None
+        self.audio_handler.cleanup()
+        log.info("Async: Cleanup complete.")
+
+# --- Helper to save audio data ---
+def save_temp_wav(audio_data):
+    """Saves raw PCM16 audio data (expected at API_AUDIO_RATE) to a temporary WAV file."""
+    if not audio_data:
+        return None
+    try:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        filepath = os.path.join(TEMP_AUDIO_DIR, f"realtime_{timestamp}.wav")
+
+        with wave.open(filepath, 'wb') as wf:
+            wf.setnchannels(AUDIO_CHANNELS)
+            wf.setsampwidth(AUDIO_WIDTH)
+            wf.setframerate(API_AUDIO_RATE) # <<< Save WAV at the rate we received (24kHz)
+            wf.writeframes(audio_data)
+        log.info(f"Saved temporary realtime audio (at {API_AUDIO_RATE} Hz) to: {filepath}")
+        return filepath
+    except Exception as e:
+        log.exception(f"Error saving temporary WAV file: {e}")
+        return None
+
+# --- Placeholder for INSTRUCTIONS ---
+INSTRUCTIONS = f"""
+You are a professional radio broadcaster. Provide a natural, broadcast-style answer.
+Answer in spanish from Spain. Use european format for all dates and units.
+Your very first message must be only the words: Realtime mode started.
+Answer in short and concise sentences. Keep responses brief.
+"""
 
 ================================================
 File: /tts.py
@@ -911,14 +1608,18 @@ print("Your vector_store_id:", VECTOR_STORE_ID)
 ================================================
 File: /gpio_controller.py
 ================================================
+# ================================================
+# File: /gpio_controller.py
+# ================================================
 """
 Background monitor for a physical push‑button and an LED on a Raspberry Pi.
 
 • Short press toggles recording in realtime_client.
 • LED lit while recording.
+• **MODIFIED:** Assumes button uses a pull-down resistor (ACTIVE_HIGH=True).
 
 Requires:  sudo apt install python3-rpi.gpio
-Will silently self‑disable on non‑Pi machines.
+Will silently self‑disable on non‑Pi machines or if disabled in config.
 """
 
 from __future__ import annotations
@@ -927,15 +1628,26 @@ import time
 import logging
 import sys
 
-import config
+import config # Import config directly
 
 log = logging.getLogger("gpio")
 
 try:
-    import RPi.GPIO as GPIO  # type: ignore
-except (ImportError, RuntimeError):
+    # Ensure GPIO library is available and enabled
+    if config.ENABLE_GPIO:
+        import RPi.GPIO as GPIO  # type: ignore
+        log.info("RPi.GPIO library loaded successfully.")
+    else:
+        GPIO = None
+        log.info("GPIO disabled by configuration (ENABLE_GPIO=False).")
+except (ImportError, RuntimeError) as e:
     GPIO = None
-    log.warning("RPi.GPIO not available – GPIO support disabled")
+    # Log specific error if import failed but GPIO was expected
+    if config.ENABLE_GPIO:
+        log.warning(f"RPi.GPIO import failed: {e} - GPIO support disabled.")
+    else:
+         # This case should not happen if config.ENABLE_GPIO is False, but log just in case
+         log.info("RPi.GPIO not available (or not an RPi) - GPIO support disabled.")
 
 
 class GPIOController:
@@ -943,52 +1655,146 @@ class GPIOController:
         self.start_cb = start_cb
         self.stop_cb = stop_cb
         self.recording = False
+        self._thread = None
+        self._stop_event = threading.Event()
+
+        # Check availability again, considering both library import and config flag
         if not (GPIO and config.ENABLE_GPIO):
-            log.info("GPIO disabled")
+            log.warning("GPIOController inactive (GPIO library not available or disabled in config).")
             self.available = False
             return
+
         self.available = True
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setup(config.BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-        GPIO.setup(config.LED_PIN, GPIO.OUT)
-        GPIO.output(config.LED_PIN, GPIO.LOW)
+        self.button_pin = config.GPIO_BUTTON_PIN
+        self.led_pin = config.GPIO_LED_PIN
+        # Determine pull resistor based on ACTIVE_HIGH setting
+        self.active_state = GPIO.HIGH if config.BUTTON_ACTIVE_HIGH else GPIO.LOW
+        self.inactive_state = GPIO.LOW if config.BUTTON_ACTIVE_HIGH else GPIO.HIGH
+        self.pull_resistor = GPIO.PUD_DOWN if config.BUTTON_ACTIVE_HIGH else GPIO.PUD_UP
+
+        try:
+            GPIO.setmode(GPIO.BCM)
+            GPIO.setwarnings(False) # Suppress warnings about channel usage
+            GPIO.setup(self.button_pin, GPIO.IN, pull_up_down=self.pull_resistor)
+            GPIO.setup(self.led_pin, GPIO.OUT)
+            GPIO.output(self.led_pin, GPIO.LOW) # Ensure LED is off initially
+            log.info(f"GPIO pins configured: Button={self.button_pin} (Active State: {self.active_state}, Pull: {self.pull_resistor}), LED={self.led_pin}")
+        except Exception as e:
+            log.exception(f"Error setting up GPIO pins: {e}")
+            self.available = False
+            GPIO.cleanup() # Attempt cleanup if setup failed
+            return
+
+        # Start monitoring thread only if setup was successful
+        self._stop_event.clear()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
-        log.info("GPIO controller running (button=%d  led=%d)",
-                 config.BUTTON_PIN, config.LED_PIN)
+        log.info("GPIO controller thread started.")
 
-    # ------------------------------------------------------ #
     def _loop(self):
-        last_state = GPIO.input(config.BUTTON_PIN)
-        debounce = 0
-        while True:
-            cur = GPIO.input(config.BUTTON_PIN)
-            if cur != last_state:
-                debounce = time.time()
-                last_state = cur
-            # detect stable falling edge (>40 ms)
-            if (last_state == GPIO.LOW
-                    and time.time() - debounce > 0.04):     # button pressed
-                self._toggle()
-                while GPIO.input(config.BUTTON_PIN) == GPIO.LOW:
-                    time.sleep(0.05)  # wait for release
-            time.sleep(0.02)
+        """Monitors the button state and triggers callbacks."""
+        log.debug(f"GPIO loop started. Monitoring pin {self.button_pin} for state {self.active_state}.")
+        last_state = self.inactive_state
+        debounce_time = 0.05  # 50ms debounce time
+        last_press_time = 0
+
+        while not self._stop_event.is_set():
+            try:
+                current_state = GPIO.input(self.button_pin)
+
+                if current_state == self.active_state and last_state == self.inactive_state:
+                    # Potential press detected (transition to active)
+                    if time.time() - last_press_time > debounce_time:
+                         log.debug("Button press detected (debounced).")
+                         self._toggle()
+                         last_press_time = time.time()
+                         # Wait for release (or timeout) to prevent multiple triggers
+                         release_start_time = time.time()
+                         while GPIO.input(self.button_pin) == self.active_state and not self._stop_event.is_set():
+                             if time.time() - release_start_time > 2.0: # 2 second timeout if stuck
+                                 log.warning("Button seems stuck in pressed state.")
+                                 break
+                             time.sleep(0.02)
+                         log.debug("Button released (or timeout).")
+                         last_state = self.inactive_state # Ensure state reset after release check
+                         continue # Skip rest of loop iteration
+
+                last_state = current_state
+                time.sleep(0.02) # Check interval
+
+            except RuntimeError as e:
+                 # Handle potential errors if GPIO access is lost mid-run
+                 if "Not initialized" in str(e) or "missing edge detection" in str(e):
+                     log.error(f"GPIO runtime error in loop (may need restart): {e}")
+                     break # Exit loop on critical GPIO error
+                 else:
+                     log.exception(f"Unexpected runtime error in GPIO loop: {e}")
+                     time.sleep(1) # Wait a bit before retrying
+            except Exception as e:
+                log.exception(f"Unexpected error in GPIO loop: {e}")
+                time.sleep(1) # Wait before retrying
+
+        log.info("GPIO monitoring loop finished.")
+        # Ensure LED is off when loop exits
+        try:
+             if self.available and GPIO:
+                  GPIO.output(self.led_pin, GPIO.LOW)
+        except Exception as e:
+             log.warning(f"Could not turn off LED during GPIO loop exit: {e}")
+
 
     def _toggle(self):
+        """Toggles the recording state and LED."""
         if not self.recording:
-            self.start_cb()
-            GPIO.output(config.LED_PIN, GPIO.HIGH)
-            self.recording = True
+            log.info("GPIO Toggle: Requesting START recording.")
+            if self.start_cb:
+                try:
+                    self.start_cb() # Call the start callback (e.g., realtime_client.start_talking)
+                    GPIO.output(self.led_pin, GPIO.HIGH)
+                    self.recording = True
+                    log.debug("GPIO Toggle: Start successful, LED ON.")
+                except Exception as e:
+                    log.error(f"GPIO Toggle: Error calling start_cb: {e}")
+                    # Ensure LED is off if start failed
+                    GPIO.output(self.led_pin, GPIO.LOW)
+                    self.recording = False
+            else:
+                 log.warning("GPIO Toggle: start_cb not defined.")
+
         else:
-            self.stop_cb()
-            GPIO.output(config.LED_PIN, GPIO.LOW)
-            self.recording = False
+            log.info("GPIO Toggle: Requesting STOP recording.")
+            if self.stop_cb:
+                try:
+                    self.stop_cb() # Call the stop callback (e.g., realtime_client.stop_talking)
+                    # State change happens after callback completes
+                    GPIO.output(self.led_pin, GPIO.LOW)
+                    self.recording = False
+                    log.debug("GPIO Toggle: Stop successful, LED OFF.")
+                except Exception as e:
+                    log.error(f"GPIO Toggle: Error calling stop_cb: {e}")
+                    # Keep LED on if stop failed? Or turn off? Let's turn off.
+                    GPIO.output(self.led_pin, GPIO.LOW)
+                    self.recording = False # Assume stopped even if callback failed? Maybe safer.
+            else:
+                log.warning("GPIO Toggle: stop_cb not defined.")
 
-    # ------------------------------------------------------ #
+
     def cleanup(self):
-        if self.available:
-            GPIO.cleanup()
+        """Stops the monitoring thread and cleans up GPIO resources."""
+        log.info("Cleaning up GPIOController...")
+        self._stop_event.set() # Signal the loop thread to stop
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=1.0) # Wait for thread to exit
+            if self._thread.is_alive():
+                 log.warning("GPIOController thread did not stop cleanly.")
 
+        if self.available and GPIO:
+            try:
+                GPIO.cleanup([self.button_pin, self.led_pin])
+                log.info("GPIO pins cleaned up.")
+            except Exception as e:
+                log.error(f"Error during GPIO cleanup: {e}")
+        self.available = False
 
 ================================================
 File: /debug.py
@@ -1264,30 +2070,47 @@ def mic_stop():
 ================================================
 File: /app.py
 ================================================
+# ================================================
+# File: /app.py
+# ================================================
 # app.py
 
 #!/usr/bin/env python3
 """
-Flask / Flask‑SocketIO server for STR, now with PDF concepts & questions,
-chat UI, and Bluetooth control removed.
+Flask / Flask‑SocketIO server for STR, now with OpenAI Realtime API,
+PDF concepts & questions, chat UI, and integrated GPIO control.
 """
 
 from __future__ import annotations
 import os
 import logging
+import threading
+import atexit
+import queue
+import wave # Needed for saving temporary audio
+
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request, send_from_directory
 from flask_socketio import SocketIO, emit
 from elevenlabs import ElevenLabs
-from openai import OpenAI
+from openai import OpenAI # Still needed for non-realtime parts
 
 from agents import process_query
 from tts import generate_tts
-from realtime import RealtimeClient, INSTRUCTIONS
+# Import the NEW RealtimeClient and helper function
+from realtime import RealtimeClient, save_temp_wav, INSTRUCTIONS, TEMP_AUDIO_DIR
 from files import PDFManager
-from config import MIC_DEVICE_INDEX, VECTOR_STORE_ID
-from debug import bp as debug_bp   # <— new
-
+from config import (
+    MIC_DEVICE_INDEX,
+    VECTOR_STORE_ID,
+    ENABLE_GPIO, # Check if GPIO is enabled
+    # Get voice ID for realtime if configured separately, else use TTS voice?
+    # Let's assume a specific realtime voice or fallback to TTS voice
+)
+from debug import bp as debug_bp
+from gpio_controller import GPIOController # Import GPIO controller
+# Import audio_manager functions needed
+from audio_manager import play_audio, terminate_pyaudio_instance as terminate_audio_manager_pyaudio
 
 # --------------------------------------------------
 # Basic Setup
@@ -1296,6 +2119,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)5s | %(name)s | %(message)s",
 )
+log = logging.getLogger("app") # App specific logger
 load_dotenv()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1303,60 +2127,179 @@ AUDIO_DIR = os.path.join(BASE_DIR, "audio_files")
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 os.makedirs(AUDIO_DIR, exist_ok=True)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(TEMP_AUDIO_DIR, exist_ok=True) # Ensure temp dir exists
 
 # --------------------------------------------------
 # API Keys & Config
 # --------------------------------------------------
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
-VOICE_ID = os.getenv("VOICE_ID")
-MODEL_ID = os.getenv("MODEL_ID")
-if not all([ELEVENLABS_API_KEY, VOICE_ID, MODEL_ID]):
+TTS_VOICE_ID = os.getenv("VOICE_ID") # Voice for ElevenLabs TTS
+MODEL_ID = os.getenv("MODEL_ID") # Model for ElevenLabs TTS
+
+# --- Realtime Config ---
+# Use a specific env var for realtime voice, or fallback to TTS voice ID
+REALTIME_VOICE = os.getenv("REALTIME_VOICE_ID", "ash") # Default 'ash' or use TTS_VOICE_ID as fallback?
+log.info(f"Using Realtime Voice: {REALTIME_VOICE}")
+
+if not all([ELEVENLABS_API_KEY, TTS_VOICE_ID, MODEL_ID]):
     logging.warning("Missing ElevenLabs API Key, Voice ID, or Model ID. TTS features might be limited.")
+
+# Check for OpenAI Key (needed for Realtime and Agent)
+if not os.getenv("OPENAI_API_KEY"):
+     log.critical("FATAL: OPENAI_API_KEY environment variable not set. Realtime and Agent features will fail.")
+     # Optionally exit or disable features explicitly
+     # exit(1)
+
 
 # --------------------------------------------------
 # Flask App and Extensions Initialization
 # --------------------------------------------------
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv('FLASK_SECRET_KEY', 'default-secret-key-please-change')
-socketio = SocketIO(app, cors_allowed_origins="*")
+# Use simple_websocket for better compatibility if needed, otherwise default should be okay
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading') # Use threading async_mode
 
-app.register_blueprint(debug_bp)   # <— new
-
+app.register_blueprint(debug_bp)
 
 # --------------------------------------------------
 # Service Clients Initialization
 # --------------------------------------------------
 try:
-    eleven_client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
+    eleven_client = ElevenLabs(api_key=ELEVENLABS_API_KEY) if ELEVENLABS_API_KEY else None
 except Exception as e:
     logging.error("Failed to initialize ElevenLabs client: %s", e)
     eleven_client = None
 
 try:
+    # Standard OpenAI client for Agent/PDF features
     openai_client = OpenAI()
 except Exception as e:
-    logging.error("Failed to initialize OpenAI client: %s", e)
-    raise RuntimeError(f"Failed to initialize OpenAI client: {e}") from e
+    logging.error("Failed to initialize standard OpenAI client: %s", e)
+    # Decide if this is fatal or just disables some features
+    openai_client = None # Allow app to run but agent/pdf might fail
 
-pdf_manager = PDFManager(UPLOAD_DIR, VECTOR_STORE_ID)
+pdf_manager = PDFManager(UPLOAD_DIR, VECTOR_STORE_ID) if openai_client and VECTOR_STORE_ID else None
+if not pdf_manager:
+    log.warning("PDF Manager disabled (OpenAI client init failed or VECTOR_STORE_ID missing).")
 
 # --------------------------------------------------
 # Realtime Client Setup
 # --------------------------------------------------
-def _broadcast(msg: str):
-    logging.info("Broadcasting message: %s", msg)
-    socketio.emit("broadcast_text", {"message": msg}, namespace="/realtime")
+realtime_client = None
+gpio_controller = None
+_realtime_audio_buffer = bytearray() # Buffer for incoming audio chunks
+_realtime_audio_lock = threading.Lock()
 
+# --- Realtime Callbacks ---
+def _on_text_delta(delta: str):
+    """Callback for text chunks from RealtimeClient."""
+    # log.debug(f"Broadcasting text delta: {delta}")
+    socketio.emit("text_delta", {"delta": delta}, namespace="/realtime")
+
+def _on_audio_chunk(chunk: bytes):
+    """Callback for audio chunks from RealtimeClient."""
+    global _realtime_audio_buffer
+    with _realtime_audio_lock:
+        _realtime_audio_buffer.extend(chunk)
+        # log.debug(f"Audio chunk received, buffer size: {len(_realtime_audio_buffer)}")
+
+def _on_response_done():
+    """Callback when an audio response is complete."""
+    global _realtime_audio_buffer
+    log.info("Realtime response done callback triggered.")
+    filepath = None
+    temp_audio_data = None
+
+    with _realtime_audio_lock:
+        if _realtime_audio_buffer:
+            # Copy data before saving/clearing
+            temp_audio_data = bytes(_realtime_audio_buffer)
+            _realtime_audio_buffer.clear() # Clear buffer immediately after copying
+            log.info(f"Audio buffer copied ({len(temp_audio_data)} bytes) and cleared.")
+        else:
+            log.warning("Response done, but audio buffer is empty.")
+
+    if temp_audio_data:
+        log.info("Attempting to save and play received audio...")
+        # Save the buffered audio to a temporary WAV file
+        filepath = save_temp_wav(temp_audio_data)
+        if filepath:
+            try:
+                # Play the saved WAV using audio_manager
+                play_audio(filepath)
+                log.info(f"Playback initiated for temporary file: {filepath}")
+                # Optionally delete the temp file immediately after starting playback?
+                # Or schedule deletion? For now, keep it.
+            except Exception as e:
+                log.exception(f"Error playing temporary audio file {filepath}: {e}")
+        else:
+            log.error("Failed to save temporary audio data, cannot play.")
+
+def _on_status_update(message: str):
+    """Callback for status updates from RealtimeClient."""
+    log.info(f"Realtime Status Update: {message}")
+    socketio.emit("status", {"message": message}, namespace="/realtime")
+
+# --- Initialize RealtimeClient ---
 try:
     realtime_client = RealtimeClient(
         instructions=INSTRUCTIONS,
-        voice="ash",
+        voice=REALTIME_VOICE,
         mic_index=MIC_DEVICE_INDEX,
-        on_text=_broadcast,
+        on_text_delta=_on_text_delta,
+        on_audio_chunk=_on_audio_chunk,
+        on_response_done=_on_response_done,
+        on_status_update=_on_status_update,
     )
+    # Start the client's background asyncio loop
+    realtime_client.start_background_loop()
+    log.info("RealtimeClient initialized and background loop started.")
+
+except ValueError as e: # Catch API key error specifically
+     log.critical(f"Failed to initialize RealtimeClient: {e}")
+     realtime_client = None
 except Exception as e:
-    logging.error("Failed to initialize RealtimeClient: %s", e)
+    log.exception("Failed to initialize RealtimeClient:")
     realtime_client = None
+
+# --- Initialize GPIO Controller (after RealtimeClient) ---
+if ENABLE_GPIO and realtime_client:
+    try:
+        # Pass the client's methods directly as callbacks
+        gpio_controller = GPIOController(
+            start_cb=realtime_client.start_talking,
+            stop_cb=realtime_client.stop_talking
+        )
+        if not gpio_controller.available:
+             log.warning("GPIOController initialized but is not available/active.")
+             gpio_controller = None # Ensure it's None if not active
+        else:
+             log.info("GPIOController initialized successfully.")
+    except Exception as e:
+        log.exception("Failed to initialize GPIOController:")
+        gpio_controller = None
+elif ENABLE_GPIO and not realtime_client:
+     log.warning("GPIO is enabled in config, but RealtimeClient failed to initialize. GPIOController not started.")
+else:
+    log.info("GPIO is disabled by configuration or platform. GPIOController not started.")
+
+
+# --------------------------------------------------
+# Cleanup Function
+# --------------------------------------------------
+@atexit.register
+def cleanup_app():
+    log.info("Application exiting. Cleaning up resources...")
+    if gpio_controller:
+        log.info("Cleaning up GPIOController...")
+        gpio_controller.cleanup()
+    if realtime_client:
+        log.info("Stopping RealtimeClient background loop...")
+        realtime_client.stop_background_loop() # This handles internal cleanup
+    # Terminate audio manager's PyAudio instance if it was used
+    terminate_audio_manager_pyaudio()
+    log.info("Cleanup complete.")
+
 
 # --------------------------------------------------
 # Basic Routes
@@ -1367,7 +2310,19 @@ def index():
 
 @app.route("/audio_files/<path:filename>")
 def serve_audio(filename):
+    # Security: Prevent accessing files outside AUDIO_DIR (e.g., ../../.. )
+    safe_path = os.path.abspath(os.path.join(AUDIO_DIR, filename))
+    if not safe_path.startswith(os.path.abspath(AUDIO_DIR)):
+        return "Forbidden", 403
     return send_from_directory(AUDIO_DIR, filename)
+
+# Add route for temporary realtime audio if needed for debugging, but generally not required
+# @app.route("/audio_files/temp_realtime/<path:filename>")
+# def serve_temp_realtime_audio(filename):
+#     safe_path = os.path.abspath(os.path.join(TEMP_AUDIO_DIR, filename))
+#     if not safe_path.startswith(os.path.abspath(TEMP_AUDIO_DIR)):
+#         return "Forbidden", 403
+#     return send_from_directory(TEMP_AUDIO_DIR, filename)
 
 # --------------------------------------------------
 # TTS Endpoint
@@ -1375,13 +2330,14 @@ def serve_audio(filename):
 @app.route("/api/tts", methods=["POST"])
 def tts_endpoint():
     if not eleven_client:
-        return jsonify({"error": "TTS service not available"}), 503
+        return jsonify({"error": "TTS service (ElevenLabs) not available"}), 503
 
     text = (request.get_json(silent=True) or {}).get("text", "").strip()
     if not text:
         return jsonify({"error": "No text provided"}), 400
     try:
-        res = generate_tts(text, eleven_client, VOICE_ID, MODEL_ID, AUDIO_DIR)
+        # Use TTS_VOICE_ID for ElevenLabs
+        res = generate_tts(text, eleven_client, TTS_VOICE_ID, MODEL_ID, AUDIO_DIR)
         safe_filename = os.path.basename(res.get('mp3_filename', ''))
         if not safe_filename:
             raise ValueError("Invalid filename received from TTS generation")
@@ -1396,6 +2352,9 @@ def tts_endpoint():
 # --------------------------------------------------
 @app.route("/api/agent", methods=["POST"])
 def agent_endpoint():
+    if not openai_client:
+         return jsonify({"error": "Agent service (OpenAI) not available"}), 503
+
     query = (request.get_json(silent=True) or {}).get("query", "").strip()
     if not query:
         return jsonify({"error": "No query provided"}), 400
@@ -1407,9 +2366,11 @@ def agent_endpoint():
         return jsonify({"error": f"Agent processing failed: {e}"}), 500
 
     audio_url = None
+    # Generate TTS for the agent response if ElevenLabs is available
     if eleven_client:
         try:
-            res = generate_tts(answer, eleven_client, VOICE_ID, MODEL_ID, AUDIO_DIR)
+            # Use TTS_VOICE_ID for ElevenLabs
+            res = generate_tts(answer, eleven_client, TTS_VOICE_ID, MODEL_ID, AUDIO_DIR)
             safe_filename = os.path.basename(res.get('mp3_filename', ''))
             if safe_filename:
                 audio_url = f"/audio_files/{safe_filename}"
@@ -1423,6 +2384,8 @@ def agent_endpoint():
 # --------------------------------------------------
 @app.route("/api/pdf/upload", methods=["POST"])
 def pdf_upload():
+    if not pdf_manager:
+         return jsonify({"error": "PDF service not available"}), 503
     if 'file' not in request.files:
         return jsonify({"error": "No file part in the request"}), 400
     file = request.files['file']
@@ -1443,6 +2406,8 @@ def pdf_upload():
 
 @app.route("/api/pdf/ask", methods=["POST"])
 def pdf_ask():
+    if not pdf_manager:
+         return jsonify({"error": "PDF service not available"}), 503
     data = request.get_json(silent=True) or {}
     question = data.get("question", "").strip()
     filename = data.get("filename") or pdf_manager.get_current_filename()
@@ -1454,9 +2419,11 @@ def pdf_ask():
     try:
         answer = pdf_manager.ask(filename, question)
         audio_url = None
+        # Generate TTS for the answer if ElevenLabs is available
         if eleven_client:
             try:
-                res = generate_tts(answer, eleven_client, VOICE_ID, MODEL_ID, AUDIO_DIR)
+                # Use TTS_VOICE_ID for ElevenLabs
+                res = generate_tts(answer, eleven_client, TTS_VOICE_ID, MODEL_ID, AUDIO_DIR)
                 safe_filename = os.path.basename(res.get('mp3_filename', ''))
                 if safe_filename:
                     audio_url = f"/audio_files/{safe_filename}"
@@ -1472,6 +2439,8 @@ def pdf_ask():
 
 @app.route("/api/pdf/concepts", methods=["POST"])
 def pdf_concepts():
+    if not pdf_manager:
+         return jsonify({"error": "PDF service not available"}), 503
     data = request.get_json(silent=True) or {}
     filename = data.get("filename") or pdf_manager.get_current_filename()
     if not filename:
@@ -1488,6 +2457,8 @@ def pdf_concepts():
 
 @app.route("/api/pdf/questions", methods=["POST"])
 def pdf_questions():
+    if not pdf_manager:
+         return jsonify({"error": "PDF service not available"}), 503
     data = request.get_json(silent=True) or {}
     filename = data.get("filename") or pdf_manager.get_current_filename()
     if not filename:
@@ -1507,51 +2478,57 @@ def pdf_questions():
 # --------------------------------------------------
 @socketio.on("connect", namespace="/realtime")
 def rt_connect():
-    logging.info("Client connected to /realtime namespace (sid: %s)", request.sid)
-    emit("status", {"message": "Ready"} if realtime_client else {"message": "Realtime Error: Service unavailable"})
+    client_sid = request.sid
+    log.info(f"Client connected to /realtime namespace (sid: {client_sid})")
+    if realtime_client and realtime_client._connected.is_set():
+         # Optionally send the *very first* message from instructions on connect
+         # For now, just send Ready status
+         _on_status_update("Ready.") # Send initial status via callback
+    elif realtime_client:
+         _on_status_update("Connecting...") # Send current status if client exists but not connected
+    else:
+         emit("status", {"message": "Realtime Error: Service unavailable"})
 
 @socketio.on("disconnect", namespace="/realtime")
 def rt_disconnect():
-    logging.info("Client disconnected from /realtime namespace (sid: %s)", request.sid)
+    client_sid = request.sid
+    log.info(f"Client disconnected from /realtime namespace (sid: {client_sid})")
 
 @socketio.on("start_talking", namespace="/realtime")
 def rt_start():
+    client_sid = request.sid
     if realtime_client:
-        try:
-            logging.info("rt_start: Requesting start talking (sid: %s)", request.sid)
-            realtime_client.start_talking()
-            emit("status", {"message": "Recording…"})
-        except Exception as e:
-            logging.exception("Error starting realtime talking")
-            emit("status", {"message": f"Error: {e}"})
+        log.info(f"rt_start: Requesting start talking (sid: {client_sid})")
+        # Clear previous audio buffer before starting new recording
+        global _realtime_audio_buffer
+        with _realtime_audio_lock:
+             _realtime_audio_buffer.clear()
+        realtime_client.start_talking() # This will trigger status updates via callback
     else:
         emit("status", {"message": "Realtime Error: Service unavailable"})
 
 @socketio.on("stop_talking", namespace="/realtime")
 def rt_stop():
+    client_sid = request.sid
     if realtime_client:
-        try:
-            logging.info("rt_stop: Requesting stop talking (sid: %s)", request.sid)
-            realtime_client.stop_talking()
-            emit("status", {"message": "Processing…"})
-        except Exception as e:
-            logging.exception("Error stopping realtime talking")
-            emit("status", {"message": f"Error: {e}"})
+        log.info(f"rt_stop: Requesting stop talking (sid: {client_sid})")
+        realtime_client.stop_talking() # This will trigger status updates via callback
     else:
         emit("status", {"message": "Realtime Error: Service unavailable"})
 
 @socketio.on("send_text", namespace="/realtime")
 def rt_send_text(data):
+    client_sid = request.sid
     text = (data or {}).get("text", "").strip()
     if text and realtime_client:
-        try:
-            logging.info("rt_send_text: Sending text to realtime: '%s' (sid: %s)", text, request.sid)
-            realtime_client.send_text(text)
-        except Exception as e:
-            logging.exception("Error sending text to realtime")
-            emit("status", {"message": f"Error sending text: {e}"})
+        log.info(f"rt_send_text: Sending text: '{text[:50]}...' (sid: {client_sid})")
+         # Clear previous audio buffer when sending text too? Maybe not necessary.
+        realtime_client.send_text(text) # This will trigger status updates via callback
     elif not realtime_client:
         emit("status", {"message": "Realtime Error: Service unavailable"})
+    elif not text:
+        log.warning(f"rt_send_text: Empty text received (sid: {client_sid})")
+
 
 # --------------------------------------------------
 # Main Execution
@@ -1562,13 +2539,22 @@ if __name__ == "__main__":
     debug_env = os.getenv("FLASK_DEBUG", "False").lower()
     run_in_debug_mode = debug_env in ["true", "1", "yes"]
 
-    logging.info(f"Starting Flask app on {host}:{port} (Debug: {run_in_debug_mode})")
-    socketio.run(app, host=host, port=port, debug=run_in_debug_mode, use_reloader=run_in_debug_mode)
+    # Disable Flask's default logger if using basicConfig or custom logging
+    # app.logger.disabled = True
+    # log = logging.getLogger('werkzeug')
+    # log.setLevel(logging.INFO) # Or WARNING to reduce noise
 
+    log.info(f"Starting Flask app with SocketIO on {host}:{port} (Debug: {run_in_debug_mode})")
+    # use_reloader=False is important when running background threads like the realtime client
+    # Debug mode with reloader can cause issues with threads and cleanup.
+    socketio.run(app, host=host, port=port, debug=run_in_debug_mode, use_reloader=False, allow_unsafe_werkzeug=run_in_debug_mode)
 
 ================================================
 File: /templates/index.html
 ================================================
+<!-- ================================================ -->
+<!-- File: /templates/index.html                      -->
+<!-- ================================================ -->
 <!DOCTYPE html>
 <html lang="es">
   <head>
@@ -1743,6 +2729,11 @@ File: /templates/index.html
         min-height: 42px; /* Minimum height like buttons */
         height: auto; /* Allow textarea to grow */
       }
+      /* Styling for realtime text display */
+      .bot .bot-text {
+        /* Target only the text part inside bot bubble */
+        min-height: 1.5em; /* Ensure some min height while loading */
+      }
     </style>
   </head>
   <body class="bg-gray-100 text-gray-900 font-sans antialiased">
@@ -1755,9 +2746,10 @@ File: /templates/index.html
 
       <!-- Tabs -->
       <nav class="flex justify-center border-b border-gray-300 pb-0" id="tabs">
-        <button data-tab="tts" class="tab active">Texto a Voz</button>
+        <button data-tab="tts" class="tab">Texto a Voz</button>
         <button data-tab="agent" class="tab">Agente</button>
-        <button data-tab="realtime" class="tab">Conversación</button>
+        <button data-tab="realtime" class="tab active">Conversación</button>
+        <!-- Default Active Tab -->
         <button data-tab="pdf" class="tab">Documentos</button>
         <button data-tab="debug" class="tab">Debug</button>
       </nav>
@@ -1765,12 +2757,11 @@ File: /templates/index.html
       <!-- Panels Container -->
       <div class="bg-white rounded-lg shadow-lg overflow-hidden">
         <!-- Texto a Voz -->
-        <section id="panel-tts" class="panel chat-container">
+        <section id="panel-tts" class="panel chat-container hidden">
           <div id="ttsFeed" class="chat-history"></div>
           <div
             class="chat-input-area flex flex-col sm:flex-row gap-3 items-start sm:items-center"
           >
-            <!-- Changed alignment -->
             <textarea
               id="ttsInput"
               class="input-box"
@@ -1778,7 +2769,6 @@ File: /templates/index.html
               rows="1"
             ></textarea>
             <div class="flex gap-2 flex-shrink-0 mt-2 sm:mt-0">
-              <!-- Added margin top for small screens -->
               <button id="ttsSend" class="btn btn-primary">Enviar</button>
               <button id="ttsClear" class="btn btn-secondary">Limpiar</button>
             </div>
@@ -1791,7 +2781,6 @@ File: /templates/index.html
           <div
             class="chat-input-area flex flex-col sm:flex-row gap-3 items-start sm:items-center"
           >
-            <!-- Changed alignment -->
             <textarea
               id="agentInput"
               class="input-box"
@@ -1799,7 +2788,6 @@ File: /templates/index.html
               rows="1"
             ></textarea>
             <div class="flex gap-2 flex-shrink-0 mt-2 sm:mt-0">
-              <!-- Added margin top for small screens -->
               <button id="agentSend" class="btn btn-primary">Enviar</button>
               <button id="agentClear" class="btn btn-secondary">Limpiar</button>
             </div>
@@ -1807,13 +2795,16 @@ File: /templates/index.html
         </section>
 
         <!-- Conversación -->
-        <section id="panel-realtime" class="panel chat-container hidden">
+        <!-- Default Visible Panel -->
+        <section id="panel-realtime" class="panel chat-container">
           <div id="realtimeFeed" class="chat-history">
+            <!-- Status will be dynamically updated -->
             <p id="realtimeStatus" class="status-message">Initializing...</p>
           </div>
           <div class="chat-input-area flex flex-col gap-4">
             <div class="flex flex-wrap gap-3 justify-center">
-              <button id="startTalking" class="btn btn-primary">
+              <button id="startTalking" class="btn btn-primary" disabled>
+                <!-- Initially disabled -->
                 🎙️ Start Mic
               </button>
               <button id="stopTalking" class="btn btn-secondary" disabled>
@@ -1827,10 +2818,12 @@ File: /templates/index.html
                 id="realtimeText"
                 class="input-box"
                 placeholder="Enviar texto al aire (Enter para enviar)"
+                disabled
               />
               <button
                 id="realtimeTextSend"
                 class="btn btn-primary flex-shrink-0"
+                disabled
               >
                 Enviar
               </button>
@@ -1946,10 +2939,18 @@ File: /templates/index.html
     </div>
 
     <script>
-      const socket = io("/realtime", { transports: ["websocket"] });
+      // Use 'const' for variables that aren't reassigned, 'let' for those that are.
       const el = (sel) => document.querySelector(sel);
       const elAll = (sel) => document.querySelectorAll(sel);
 
+      // --- Global State ---
+      let currentBotBubble = null; // Track the bubble being updated by text_delta
+
+      // --- WebSocket Connection ---
+      // Ensure the transport is websocket for realtime
+      const socket = io("/realtime", { transports: ["websocket"] });
+
+      // --- UI Helper Functions ---
       function showToast(message, type = "info") {
         console.log(`TOAST (${type}): ${message}`);
         const toastContainer = el("#toast-container") || createToastContainer();
@@ -1962,76 +2963,69 @@ File: /templates/index.html
             ? "bg-green-600"
             : "bg-blue-600"
         }`;
-        toast.style.opacity = "0"; // Start transparent
-        toast.style.transform = "translateY(20px)"; // Start lower
-
-        toastContainer.insertBefore(toast, toastContainer.firstChild); // Add new toasts at the top
-
-        // Animate in
+        toast.style.opacity = "0";
+        toast.style.transform = "translateY(20px)";
+        toastContainer.insertBefore(toast, toastContainer.firstChild);
         requestAnimationFrame(() => {
           toast.style.opacity = "1";
           toast.style.transform = "translateY(0)";
         });
-
-        // Auto-remove
         setTimeout(() => {
           toast.style.opacity = "0";
-          toast.style.transform = "translateY(-20px)"; // Animate out upwards
+          toast.style.transform = "translateY(-20px)";
           toast.addEventListener("transitionend", () => toast.remove());
         }, 3500);
       }
       function createToastContainer() {
         const container = document.createElement("div");
         container.id = "toast-container";
-        container.className = "fixed bottom-5 right-5 z-50 w-64"; // Position & size
+        container.className = "fixed bottom-5 right-5 z-50 w-64";
         document.body.appendChild(container);
         return container;
       }
 
-      const feedClear = (feedSel, statusSel = null, initialMsg = "") => {
+      function feedClear(feedSel, statusSel = null, initialMsg = "") {
         const feed = el(feedSel);
         if (!feed) return;
-        feed.innerHTML = "";
-        if (statusSel) {
-          const statusElement = el(statusSel);
-          if (statusElement) {
-            // Check if the status element is *supposed* to be inside the feed
-            const isChild = statusElement.closest(feedSel);
-            if (isChild) {
-              // Recreate it if it's meant to be inside
-              const p = document.createElement("p");
-              p.id = statusElement.id; // Keep the original ID
-              p.className = "status-message";
-              p.textContent = initialMsg;
-              feed.appendChild(p);
-            } else {
-              // Update it if it's outside the feed
-              statusElement.textContent = initialMsg;
-            }
-          }
+        feed.innerHTML = ""; // Clear previous content
+        currentBotBubble = null; // Reset current bot bubble tracking for this feed
+
+        // Re-add status message if provided
+        if (statusSel && initialMsg) {
+          const statusP = document.createElement("p");
+          statusP.id = statusSel.substring(1); // Remove # for ID
+          statusP.className = "status-message";
+          statusP.textContent = initialMsg;
+          feed.appendChild(statusP);
         }
-      };
+      }
 
       function appendBubble(feedSel, text, who, audioUrl = null) {
         const feed = el(feedSel);
         if (!feed) return;
-        // Remove initial status message if present
-        const statusMsg = feed.querySelector(".status-message");
-        if (statusMsg) statusMsg.remove();
+
+        // Remove initial status message ONLY if it exists and we're adding the first bubble
+        if (
+          feed.children.length === 1 &&
+          feed.children[0].classList.contains("status-message")
+        ) {
+          feed.children[0].remove();
+        }
 
         const bubbleDiv = document.createElement("div");
-        bubbleDiv.className = `bubble ${who} flex flex-col`; // Flex column for text + audio
-        const textNode = document.createElement("p");
-        textNode.textContent = text;
-        bubbleDiv.appendChild(textNode);
+        bubbleDiv.className = `bubble ${who} flex flex-col`;
+        const textP = document.createElement("p");
+        textP.className = `${who}-text`; // Add class for specific styling/selection
+        textP.textContent = text;
+        bubbleDiv.appendChild(textP);
 
         if (audioUrl) {
           try {
             const audio = document.createElement("audio");
             audio.controls = true;
-            audio.preload = "metadata"; // Don't load full audio until played
+            audio.preload = "metadata";
             audio.src = audioUrl;
-            audio.className = "mt-2 w-full"; // Style the audio player
+            audio.className = "mt-2 w-full";
             bubbleDiv.appendChild(audio);
           } catch (e) {
             console.error("Error creating audio element:", e);
@@ -2042,23 +3036,31 @@ File: /templates/index.html
           }
         }
         feed.appendChild(bubbleDiv);
-        // Scroll to bottom smoothly after the element is added
+
+        // If this is a bot bubble, track it for potential delta updates
+        if (who === "bot") {
+          currentBotBubble = textP; // Track the text paragraph element
+        } else {
+          currentBotBubble = null; // Clear tracking if user bubble added
+        }
+
+        // Scroll to bottom
         requestAnimationFrame(() => {
           feed.scrollTo({ top: feed.scrollHeight, behavior: "smooth" });
         });
+
+        return textP; // Return the text element for potential updates
       }
 
-      // *** MODIFIED: Removed AbortController and timeout logic ***
+      // --- API Call Function (No changes needed) ---
       async function apiCall(endpoint, method = "POST", body = null) {
         try {
           const options = {
             method,
             headers: {},
-            // signal: controller.signal, // <-- REMOVED
           };
           if (body) {
             if (body instanceof FormData) {
-              // Let browser set Content-Type for FormData
               options.body = body;
             } else {
               options.headers["Content-Type"] = "application/json";
@@ -2066,27 +3068,22 @@ File: /templates/index.html
             }
           }
           const response = await fetch(endpoint, options);
-          // clearTimeout(timeoutId); // <-- REMOVED
 
           let data;
           const contentType = response.headers.get("content-type");
           if (contentType && contentType.includes("application/json")) {
             data = await response.json();
           } else {
-            // Handle non-JSON responses (e.g., plain text errors)
             const text = await response.text();
-            // Synthesize a JSON-like structure for consistency
             data = {
               success: response.ok,
               status_text: text || response.statusText,
             };
             if (!response.ok) {
-              data.error = data.status_text; // Assign text as error message
+              data.error = data.status_text;
             }
           }
-          // Ensure 'success' property reflects HTTP status
           if (data.success === undefined) data.success = response.ok;
-          // Standardize error message reporting
           if (!response.ok && !data.error) {
             data.error =
               data.message ||
@@ -2095,12 +3092,7 @@ File: /templates/index.html
           }
           return data;
         } catch (err) {
-          // clearTimeout(timeoutId); // <-- REMOVED
           console.error(`API call to ${endpoint} failed:`, err);
-          // Removed specific AbortError handling as timeout is removed
-          // if (err.name === "AbortError") {
-          //   return { success: false, error: "Request timed out." };
-          // }
           return {
             success: false,
             error: err.message || "Network or script error",
@@ -2108,7 +3100,7 @@ File: /templates/index.html
         }
       }
 
-      /* Tabs */
+      // --- Tab Switching Logic ---
       const tabs = elAll("#tabs .tab");
       const panels = elAll(".panel");
       tabs.forEach((tab) => {
@@ -2119,67 +3111,68 @@ File: /templates/index.html
           panels.forEach((p) => {
             p.classList.toggle("hidden", p.id !== targetPanelId);
           });
+          // Reset current bubble tracking when switching tabs
+          if (tab.dataset.tab !== "realtime") {
+            currentBotBubble = null;
+          }
         };
       });
 
       /* ====================================================== */
       /*                Input Handling & Submission             */
       /* ====================================================== */
-
       function setupEnterKeySubmission(inputId, buttonId, isTextarea = false) {
         const inputElement = el(inputId);
         const buttonElement = el(buttonId);
-        if (!inputElement || !buttonElement) {
-          console.warn(`Setup failed: Cannot find ${inputId} or ${buttonId}`);
-          return;
-        }
+        if (!inputElement || !buttonElement) return;
 
         inputElement.addEventListener("keydown", (event) => {
-          if (event.key === "Enter") {
+          if (event.key === "Enter" && !buttonElement.disabled) {
+            // Check if button is enabled
             if (isTextarea) {
-              // For textareas, only submit if Shift is NOT pressed
               if (!event.shiftKey) {
-                event.preventDefault(); // Prevent newline
-                buttonElement.click(); // Trigger button click
+                event.preventDefault();
+                buttonElement.click();
               }
-              // If Shift is pressed, allow default newline behavior
             } else {
-              // For regular inputs, always submit on Enter
-              event.preventDefault(); // Prevent potential form submission if wrapped
-              buttonElement.click(); // Trigger button click
+              event.preventDefault();
+              buttonElement.click();
             }
           }
         });
 
-        // Auto-resize textarea height
         if (isTextarea) {
           inputElement.addEventListener("input", () => {
-            inputElement.style.height = "auto"; // Reset height
-            inputElement.style.height = `${inputElement.scrollHeight}px`; // Set to scroll height
+            inputElement.style.height = "auto";
+            inputElement.style.height = `${inputElement.scrollHeight}px`;
           });
+          // Initial resize on load
+          inputElement.style.height = "auto";
+          inputElement.style.height = `${inputElement.scrollHeight}px`;
         }
       }
 
-      // --- Setup Enter Key for all relevant inputs ---
-      setupEnterKeySubmission("#ttsInput", "#ttsSend", true); // Textarea
-      setupEnterKeySubmission("#agentInput", "#agentSend", true); // Textarea
-      setupEnterKeySubmission("#realtimeText", "#realtimeTextSend", false); // Input
-      setupEnterKeySubmission("#pdfQuestion", "#pdfAsk", false); // Input
+      // Setup Enter Key for relevant inputs
+      setupEnterKeySubmission("#ttsInput", "#ttsSend", true);
+      setupEnterKeySubmission("#agentInput", "#agentSend", true);
+      setupEnterKeySubmission("#realtimeText", "#realtimeTextSend", false);
+      setupEnterKeySubmission("#pdfQuestion", "#pdfAsk", false);
 
       /* ====================================================== */
       /*                      Tab Logic                         */
       /* ====================================================== */
 
-      /* TTS */
+      /* --- TTS --- */
       const ttsInput = el("#ttsInput"),
         ttsSendBtn = el("#ttsSend"),
         ttsFeed = "#ttsFeed";
       ttsSendBtn.onclick = async () => {
+        /* ... (no changes needed) ... */
         const txt = ttsInput.value.trim();
         if (!txt) return;
         appendBubble(ttsFeed, txt, "user");
         ttsInput.value = "";
-        ttsInput.style.height = "auto"; // Reset height after sending
+        ttsInput.style.height = "auto";
         ttsInput.focus();
         ttsSendBtn.disabled = true;
         const res = await apiCall("/api/tts", "POST", { text: txt });
@@ -2197,16 +3190,17 @@ File: /templates/index.html
       };
       el("#ttsClear").onclick = () => feedClear(ttsFeed);
 
-      /* Agent */
+      /* --- Agent --- */
       const agentInput = el("#agentInput"),
         agentSendBtn = el("#agentSend"),
         agentFeed = "#agentFeed";
       agentSendBtn.onclick = async () => {
+        /* ... (no changes needed) ... */
         const q = agentInput.value.trim();
         if (!q) return;
         appendBubble(agentFeed, q, "user");
         agentInput.value = "";
-        agentInput.style.height = "auto"; // Reset height after sending
+        agentInput.style.height = "auto";
         agentInput.focus();
         agentSendBtn.disabled = true;
         const res = await apiCall("/api/agent", "POST", { query: q });
@@ -2224,81 +3218,148 @@ File: /templates/index.html
       };
       el("#agentClear").onclick = () => feedClear(agentFeed);
 
-      /* Realtime */
+      /* --- Realtime (MODIFIED) --- */
       const startBtn = el("#startTalking"),
         stopBtn = el("#stopTalking"),
         rtStatus = el("#realtimeStatus"),
         realtimeFeed = "#realtimeFeed",
         rtText = el("#realtimeText"),
-        rtTextSend = el("#realtimeTextSend");
-      startBtn.onclick = () => socket.emit("start_talking");
+        rtTextSend = el("#realtimeTextSend"),
+        rtClearBtn = el("#rtClear");
+
+      startBtn.onclick = () => {
+        currentBotBubble = null; // Reset bubble tracking on new recording
+        socket.emit("start_talking");
+      };
       stopBtn.onclick = () => socket.emit("stop_talking");
-      el("#rtClear").onclick = () =>
-        feedClear(realtimeFeed, "#realtimeStatus", "Ready");
+      rtClearBtn.onclick = () => {
+        // Clear feed and reset status based on connection state
+        const currentStatus = rtStatus.textContent;
+        feedClear(
+          realtimeFeed,
+          "#realtimeStatus",
+          currentStatus.includes("Error") ||
+            currentStatus.includes("Disconnected")
+            ? currentStatus
+            : "Ready."
+        );
+      };
       rtTextSend.onclick = () => {
         const m = rtText.value.trim();
         if (!m) return;
-        appendBubble(realtimeFeed, m, "user");
+        appendBubble(realtimeFeed, m, "user"); // Add user message
+        currentBotBubble = null; // Expect a new bot response, clear tracking
         rtText.value = "";
         rtText.focus();
         socket.emit("send_text", { text: m });
       };
-      // Socket.IO listeners for realtime
+
+      // -- Socket.IO listeners for Realtime (MODIFIED) --
       socket.on("status", (d) => {
-        rtStatus.textContent = d.message;
-        if (d.message === "Recording…") {
+        const msg = d.message || "Status unknown";
+        rtStatus.textContent = msg;
+        console.log("Status received:", msg); // Debug log
+
+        // Enable/disable buttons based on status
+        if (
+          msg.includes("Error") ||
+          msg.includes("Disconnected") ||
+          msg.includes("unavailable")
+        ) {
           startBtn.disabled = true;
-          stopBtn.disabled = false;
-          rtTextSend.disabled = true; // Disable text send while mic is active? Optional.
-        } else if (d.message === "Ready" || d.message.startsWith("Error:")) {
+          stopBtn.disabled = true;
+          rtText.disabled = true;
+          rtTextSend.disabled = true;
+        } else if (msg === "Connecting...") {
+          startBtn.disabled = true;
+          stopBtn.disabled = true;
+          rtText.disabled = true;
+          rtTextSend.disabled = true;
+        } else if (msg === "Ready.") {
           startBtn.disabled = false;
           stopBtn.disabled = true;
+          rtText.disabled = false;
           rtTextSend.disabled = false;
-        } else {
-          // Processing... state
+          currentBotBubble = null; // Ensure bubble tracking is cleared when ready
+        } else if (msg === "Recording...") {
           startBtn.disabled = true;
-          stopBtn.disabled = true;
-          rtTextSend.disabled = false; // Allow sending text while processing
-        }
-        // Handle specific error case
-        if (d.message.includes("Realtime Error: Service unavailable")) {
-          startBtn.disabled = true;
-          stopBtn.disabled = true;
+          stopBtn.disabled = false;
+          rtText.disabled = true; // Disable text input while recording
           rtTextSend.disabled = true;
+          currentBotBubble = null; // Recording started, no active bot bubble yet
+        } else if (msg === "Processing...") {
+          startBtn.disabled = true; // Can't start while processing
+          stopBtn.disabled = true; // Can't stop while already processing
+          rtText.disabled = false; // Allow sending text while processing audio? Maybe disable.
+          rtTextSend.disabled = false; // Let's disable for simplicity.
+          rtText.disabled = true;
+          rtTextSend.disabled = true;
+        } else {
+          // Default state (e.g., Connected) - similar to Ready
+          startBtn.disabled = false;
+          stopBtn.disabled = true;
+          rtText.disabled = false;
+          rtTextSend.disabled = false;
         }
       });
-      socket.on("broadcast_text", (d) => {
-        appendBubble(realtimeFeed, d.message, "bot");
-        rtStatus.textContent = "Ready"; // Set status back to ready after broadcast
-        startBtn.disabled = false;
-        stopBtn.disabled = true;
-        rtTextSend.disabled = false;
+
+      socket.on("text_delta", (d) => {
+        const delta = d.delta || "";
+        // console.log("Delta:", delta); // Debug log for delta
+
+        if (!currentBotBubble) {
+          // If no current bubble, create a new one
+          console.log("Creating new bot bubble for delta.");
+          // Add a placeholder or the first delta piece
+          appendBubble(realtimeFeed, delta, "bot");
+          // currentBotBubble is now set by appendBubble
+        } else {
+          // Append delta to the existing tracked bubble's text content
+          currentBotBubble.textContent += delta;
+          // Scroll to bottom as text grows
+          const feed = el(realtimeFeed);
+          if (feed) {
+            requestAnimationFrame(() => {
+              feed.scrollTo({ top: feed.scrollHeight, behavior: "auto" }); // Use auto scroll during delta for performance
+            });
+          }
+        }
       });
+
+      // No broadcast_text event anymore, audio is played by server triggering playback
+      // socket.on("broadcast_text", ...) -> REMOVED
+
       socket.on("connect", () => {
         console.log("Realtime WebSocket connected.");
-        rtStatus.textContent = "Connected. Ready.";
-        startBtn.disabled = false;
-        stopBtn.disabled = true;
-        rtTextSend.disabled = false;
+        // Status update will be sent by server on connect
+        // rtStatus.textContent = "Connected. Ready.";
+        // startBtn.disabled = false;
+        // stopBtn.disabled = true;
+        // rtText.disabled = false;
+        // rtTextSend.disabled = false;
       });
       socket.on("disconnect", (reason) => {
         console.log(`Realtime WebSocket disconnected: ${reason}`);
         rtStatus.textContent = "Disconnected. Check server.";
         startBtn.disabled = true;
         stopBtn.disabled = true;
+        rtText.disabled = true;
         rtTextSend.disabled = true;
         showToast("Realtime connection lost.", "error");
+        currentBotBubble = null; // Reset tracking on disconnect
       });
       socket.on("connect_error", (err) => {
         console.error(`Realtime connection error: ${err.message}`);
         rtStatus.textContent = `Connection Error: ${err.message}`;
         startBtn.disabled = true;
         stopBtn.disabled = true;
+        rtText.disabled = true;
         rtTextSend.disabled = true;
         showToast(`Realtime connection error: ${err.message}`, "error");
+        currentBotBubble = null; // Reset tracking on error
       });
 
-      /* PDF */
+      /* --- PDF --- */
       let currentPDF = null;
       const pdfFile = el("#pdfFile"),
         pdfAskBtn = el("#pdfAsk"),
@@ -2308,12 +3369,13 @@ File: /templates/index.html
         pdfStatus = el("#pdfUploadStatus"),
         pdfQA = el("#pdfQA");
       pdfFile.onchange = async () => {
+        /* ... (no changes needed) ... */
         const file = pdfFile.files[0];
         if (!file) return;
         pdfStatus.textContent = "⏳ Subiendo e indexando PDF…";
         pdfQA.classList.add("hidden");
         pdfAskBtn.disabled = true;
-        pdfFile.disabled = true; // Disable input while uploading
+        pdfFile.disabled = true;
         currentPDF = null;
         const fd = new FormData();
         fd.append("file", file);
@@ -2324,20 +3386,21 @@ File: /templates/index.html
           pdfStatus.textContent = txt;
           pdfQA.classList.remove("hidden");
           pdfAskBtn.disabled = false;
-          pdfQuestion.value = ""; // Clear question field
+          pdfQuestion.value = "";
           pdfQuestion.focus();
-          feedClear(pdfFeed, "#pdfUploadStatus", txt); // Clear chat, keep status
+          feedClear(pdfFeed, "#pdfUploadStatus", txt);
           showToast(`PDF "${currentPDF}" cargado`, "success");
         } else {
           pdfStatus.textContent = `⚠️ Error al cargar PDF: ${
             res.error || "Unknown"
           }`;
-          pdfFile.value = ""; // Clear file input
+          pdfFile.value = "";
           showToast(`Error cargando PDF: ${res.error || "Unknown"}`, "error");
         }
-        pdfFile.disabled = false; // Re-enable input
+        pdfFile.disabled = false;
       };
       pdfAskBtn.onclick = async () => {
+        /* ... (no changes needed) ... */
         const q = pdfQuestion.value.trim();
         if (!q || !currentPDF) {
           showToast(
@@ -2370,17 +3433,18 @@ File: /templates/index.html
         pdfAskBtn.disabled = false;
       };
       pdfClearBtn.onclick = () => {
+        /* ... (no changes needed) ... */
         const txt = currentPDF
           ? `✅ PDF listo: ${currentPDF}`
           : "Elige un PDF para cargar…";
         feedClear(pdfFeed, "#pdfUploadStatus", txt);
       };
 
-      /* Debug Controls */
+      /* --- Debug Controls --- */
       const debugStatus = el("#debugStatus");
-
       // Tone
       el("#tonePlay").onclick = async () => {
+        /* ... (no changes needed) ... */
         const f = +el("#toneFreq").value || 440;
         const d = +el("#toneDur").value || 500;
         debugStatus.textContent = "Generando y reproduciendo tono...";
@@ -2396,9 +3460,9 @@ File: /templates/index.html
           debugStatus.textContent = `Error con el tono: ${res.error}`;
         }
       };
-
       // LED
       el("#ledTest").onclick = async () => {
+        /* ... (no changes needed) ... */
         debugStatus.textContent = "Probando LED...";
         const res = await apiCall("/api/debug/led", "POST");
         if (res.success) {
@@ -2409,9 +3473,9 @@ File: /templates/index.html
           debugStatus.textContent = `Error de LED: ${res.error}`;
         }
       };
-
       // Button State
       el("#btnState").onclick = async () => {
+        /* ... (no changes needed) ... */
         debugStatus.textContent = "Leyendo botón...";
         const res = await apiCall("/api/debug/button", "GET");
         const btnResultSpan = el("#btnResult");
@@ -2424,46 +3488,43 @@ File: /templates/index.html
           debugStatus.textContent = `Error leyendo botón: ${res.error}`;
         }
       };
-
       // Mic Record Start/Stop
-      const micStartBtn = el("#micStart");
-      const micStopBtn = el("#micStop");
-      const micAudio = el("#micPlayback");
-      const micPlaybackStatus = el("#micPlaybackStatus");
-
+      const micStartBtn = el("#micStart"),
+        micStopBtn = el("#micStop"),
+        micAudio = el("#micPlayback"),
+        micPlaybackStatus = el("#micPlaybackStatus");
       micStartBtn.onclick = async () => {
+        /* ... (no changes needed) ... */
         debugStatus.textContent = "Iniciando grabación...";
         micPlaybackStatus.textContent = "";
-        micAudio.style.display = "none"; // Hide player
-        micAudio.src = ""; // Clear previous src
-
+        micAudio.style.display = "none";
+        micAudio.src = "";
         micStartBtn.disabled = true;
         const res = await apiCall("/api/debug/mic/start", "POST");
         if (res.success) {
-          micStopBtn.disabled = false; // Enable stop button ONLY on success
+          micStopBtn.disabled = false;
           showToast("Grabación iniciada", "info");
           debugStatus.textContent = "⏺️ Grabando...";
         } else {
-          micStartBtn.disabled = false; // Re-enable start on error
+          micStartBtn.disabled = false;
           showToast(`Error al iniciar grabación: ${res.error}`, "error");
           debugStatus.textContent = `Error al iniciar: ${res.error}`;
         }
       };
-
       micStopBtn.onclick = async () => {
+        /* ... (no changes needed) ... */
         debugStatus.textContent = "Deteniendo grabación...";
-        micStopBtn.disabled = true; // Disable stop while processing
+        micStopBtn.disabled = true;
         const res = await apiCall("/api/debug/mic/stop", "POST");
         if (res.success && res.audio_url) {
           micAudio.src = res.audio_url;
-          micAudio.style.display = "block"; // Show player
+          micAudio.style.display = "block";
           micPlaybackStatus.textContent = `Grabación guardada: ${res.audio_url
             .split("/")
             .pop()}`;
           showToast("Grabación detenida y guardada", "success");
           debugStatus.textContent =
             "Grabación detenida. Lista para reproducir.";
-          // Optional: Auto-play -> micAudio.play();
         } else {
           micPlaybackStatus.textContent = `Error: ${
             res.error || "No se pudo guardar"
@@ -2476,19 +3537,22 @@ File: /templates/index.html
             res.error || "Unknown"
           }`;
         }
-        // Always re-enable start button after stop attempt
         micStartBtn.disabled = false;
       };
 
-      // Clear Debug Feed (Optional)
-      // You could add a clear button for the debug status messages if needed.
-      // el("#debugClear").onclick = () => {
-      //     debugStatus.textContent = "Herramientas de depuración";
-      //     el("#btnResult").textContent = "";
-      //     micPlaybackStatus.textContent = "";
-      //     micAudio.style.display = 'none';
-      //     micAudio.src = '';
-      // };
+      // --- Initial UI State ---
+      // Ensure the correct tab is shown on load
+      document.addEventListener("DOMContentLoaded", () => {
+        tabs.forEach((t) => t.classList.remove("active"));
+        panels.forEach((p) => p.classList.add("hidden"));
+        el('button[data-tab="realtime"]').classList.add("active");
+        el("#panel-realtime").classList.remove("hidden");
+
+        // Attempt initial connection status check if socket connected quickly
+        if (socket.connected) {
+          socket.emit("request_status"); // Or rely on server sending status on connect
+        }
+      });
     </script>
   </body>
 </html>
