@@ -33,10 +33,10 @@ TARGET_RATE = 44100                  # <<< CHANGE THIS (e.g., 44100, 48000, 9600
 
 # 4. Target Bit Depth (Choose 16 or 24)
 #    NOTE: 24-bit support depends heavily on ALSA config, PyAudio version, and DAC hardware.
-TARGET_BIT_DEPTH = 24                # <<< CHANGE THIS (16 or 24)
+TARGET_BIT_DEPTH = 16               # <<< CHANGE THIS (16 or 24)
 
 # 5. Playback buffer size (usually okay to leave as default)
-CHUNK_SIZE = 1024
+CHUNK_SIZE = 512
 # --- End Configuration ---
 
 # --- Logging Setup ---
@@ -161,7 +161,7 @@ def play_test_audio(filepath, device_index, target_rate, target_bit_depth, chunk
                 channels=native_channels,     # Use channels from WAV file
                 rate=target_rate,             # Use TARGET rate
                 output=True,                  # Output stream
-                output_device_index=device_index, # Specify target device
+                #output_device_index=device_index, # Specify target device
                 frames_per_buffer=chunk_size
             )
             logging.info(f"Successfully opened stream on device {device_index}.")
