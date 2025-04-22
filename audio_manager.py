@@ -46,7 +46,7 @@ def terminate_pyaudio_instance():
             _p = None
 
 def save_stream_to_file(stream, filepath):
-    """Save streaming data (like from ElevenLabs) to a file."""
+    """Save streaming data (like from ElevenLabs) to a file. """
     try:
         with open(filepath, "wb") as f:
             for chunk in stream:
