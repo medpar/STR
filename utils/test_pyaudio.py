@@ -1,13 +1,21 @@
 # ================================================
-# File: test_pyaudio_interactive_channels.py
+# File: test_pyaudio_interactive_channels_fixed.py
 # ================================================
 #!/usr/bin/env python3
 """
 PyAudio Playback Test Script for Raspberry Pi DAC Debugging.
 
 Allows testing playback of a WAV file with user-specified (or interactively prompted)
-device index, sample rate, bit depth, channels, and chunk size.
+device index, sample rate, bit depth, channels (for verification), and chunk size.
 Includes diagnostics for playback speed issues.
+
+NOTE on ALSA Errors: You might see numerous 'ALSA lib ... Unknown PCM ...' errors
+when this script starts, especially on Raspberry Pi OS. These are usually harmless
+warnings related to ALSA trying to parse default configurations that may not
+perfectly match your hardware setup. As long as you can list your devices and
+successfully open a stream using the correct device index (e.g., for your PCM5102),
+these errors can typically be ignored. The script uses the device index directly,
+bypassing these abstract PCM names.
 """
 
 import pyaudio
@@ -30,7 +38,9 @@ def list_audio_devices():
     p = None
     try:
         p = pyaudio.PyAudio()
-        info = p.get_host_api_info_by_index(0) # Default host API
+        # The ALSA errors often occur during PyAudio() initialization or get_host_api_info
+        logging.info("Initializing PyAudio to list devices (ALSA warnings below are common)...")
+        info = p.get_host_api_info_by_index(0) # Default host API (ALSA on Linux)
         numdevices = info.get('deviceCount', 0)
         logging.info("Listing Available Audio Devices:")
         logging.info("-" * 60)
@@ -49,7 +59,7 @@ def list_audio_devices():
 
                 log_msg = f"  Device Index: {i}"
                 log_msg += f" | Name: {device_name}"
-                log_msg += f" | Max Output Channels: {max_out_channels}" # Log max output channels
+                log_msg += f" | Max Output Channels: {max_out_channels}"
                 log_msg += f" | Default Rate: {default_rate} Hz"
 
                 if max_out_channels > 0:
@@ -57,18 +67,18 @@ def list_audio_devices():
                     logging.info(log_msg)
                     found_output = True
                 else:
-                    logging.debug(log_msg) # Use debug level for non-output devices
+                    logging.debug(log_msg)
 
             except Exception as e:
                 logging.error(f"  Error getting info for device index {i}: {e}")
                 logging.error(f"  Device Info received: {device_info}")
-
 
         if not found_output:
              logging.warning("Could not find any potential output devices.")
 
         logging.info("-" * 60)
     except Exception as e:
+        # Log PyAudio specific errors separately from the ALSA config warnings
         logging.error(f"Error initializing PyAudio or listing devices: {e}")
     finally:
         if p:
@@ -84,16 +94,18 @@ def get_pyaudio_format_from_depth(bit_depth):
     else:
         raise ValueError(f"Unsupported target bit depth: {bit_depth}. Only 16 or 24 are supported.")
 
-# Modified function signature to include target_channels
-def play_test_audio(filepath, device_index, target_rate, target_bit_depth, target_channels, chunk_size):
-    """Attempts to play the WAV file with the specified settings and logs timing info."""
+def play_test_audio(filepath, device_index, target_rate, target_bit_depth, target_channels_user_input, chunk_size):
+    """
+    Attempts to play the WAV file using its native channel count for the stream,
+    while allowing user to specify parameters for testing. Logs timing info.
+    """
 
     logging.info(f"--- Starting Playback Test ---")
     logging.info(f"  File: '{os.path.basename(filepath)}'")
     logging.info(f"  Target Device Index: {device_index}")
     logging.info(f"  Target Sample Rate: {target_rate} Hz")
     logging.info(f"  Target Bit Depth: {target_bit_depth}-bit")
-    logging.info(f"  Target Channels: {target_channels}") # Log target channels
+    logging.info(f"  Target Channels (User Input): {target_channels_user_input}") # Label clearly
     logging.info(f"  Chunk Size: {chunk_size} frames")
     logging.info("-" * 40)
 
@@ -102,28 +114,40 @@ def play_test_audio(filepath, device_index, target_rate, target_bit_depth, targe
     stream = None
     success = False
     native_rate = 0
-    native_channels = 0
+    native_channels = 0 # Will store actual channels from file
     native_width = 0
     total_frames_read = 0
+    frames_written = 0 # Initialize here
 
     try:
         # --- 2. Open WAV File ---
         try:
             wf = wave.open(filepath, 'rb')
             native_rate = wf.getframerate()
-            native_channels = wf.getnchannels()
-            native_width = wf.getsampwidth() # Bytes per sample
+            native_channels = wf.getnchannels() # Get ACTUAL channels here
+            native_width = wf.getsampwidth()
             native_bit_depth = native_width * 8
             total_frames_in_file = wf.getnframes()
             expected_duration = total_frames_in_file / float(native_rate) if native_rate > 0 else 0
 
             logging.info("Opened WAV file Properties:")
             logging.info(f"  Native Sample Rate: {native_rate} Hz")
-            logging.info(f"  Native Channels: {native_channels}") # Log native channels
+            logging.info(f"  Native Channels: {native_channels}") # Log actual native channels
             logging.info(f"  Native Bit Depth: {native_bit_depth}-bit")
             logging.info(f"  Total Frames: {total_frames_in_file}")
             logging.info(f"  Expected Duration: {expected_duration:.2f} seconds")
             logging.info("-" * 40)
+
+            # --- Check if WAV file properties make sense ---
+            if native_channels <= 0 or native_channels > 32 : # Add sanity check
+                logging.error(f"Invalid or unsupported number of channels ({native_channels}) reported by WAV file. Cannot proceed.")
+                return False
+            if native_rate <= 0 or native_rate > 768000: # Add sanity check
+                logging.error(f"Invalid or unsupported sample rate ({native_rate}) reported by WAV file. Cannot proceed.")
+                return False
+            if native_bit_depth not in [8, 16, 24, 32]: # Check common depths
+                 logging.warning(f"Uncommon native bit depth ({native_bit_depth}-bit) detected in WAV.")
+                 # Allow proceeding but warn user
 
         except wave.Error as e:
             logging.error(f"Could not open or read WAV file '{filepath}': {e}")
@@ -135,24 +159,24 @@ def play_test_audio(filepath, device_index, target_rate, target_bit_depth, targe
         # --- DEBUGGING: Sample Rate Mismatch ---
         if native_rate != target_rate:
             logging.warning("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-            logging.warning(f"SAMPLE RATE MISMATCH DETECTED!")
-            logging.warning(f"  WAV file rate is {native_rate} Hz.")
-            logging.warning(f"  You requested playback at {target_rate} Hz.")
-            logging.warning("  --> This is the MOST LIKELY cause of slow/fast playback or incorrect pitch.")
+            logging.warning(f"SAMPLE RATE MISMATCH DETECTED! (WAV: {native_rate} Hz, Target: {target_rate} Hz)")
+            logging.warning("  --> LIKELY CAUSE of slow/fast playback or incorrect pitch.")
+            logging.warning("      Try setting --rate to match the WAV file's native rate.")
             logging.warning("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         else:
              logging.info("Target sample rate matches the WAV file's native sample rate.")
 
-        # --- DEBUGGING: Channel Mismatch ---
-        if native_channels != target_channels:
+        # --- DEBUGGING: Channel Mismatch (User Input vs File) ---
+        if native_channels != target_channels_user_input:
             logging.warning("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-            logging.warning(f"CHANNEL COUNT MISMATCH DETECTED!")
-            logging.warning(f"  WAV file has {native_channels} channel(s).")
-            logging.warning(f"  You requested playback using {target_channels} channel(s).")
-            logging.warning("  --> This might cause unexpected audio output (e.g., silent channels, mixed audio) or errors.")
+            logging.warning(f"USER CHANNEL MISMATCH! (WAV: {native_channels} Ch, User Target: {target_channels_user_input} Ch)")
+            logging.warning(f"  --> IMPORTANT: The stream will be opened with {native_channels} channel(s) (from the file),")
+            logging.warning(f"      NOT the {target_channels_user_input} channel(s) you requested via --channels.")
+            logging.warning("      This ensures correct playback speed based on file content.")
+            logging.warning("      Check if your DAC (PCM5102 likely supports 2 channels) and ALSA config handle this correctly.")
             logging.warning("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         else:
-            logging.info("Target channel count matches the WAV file's native channel count.")
+            logging.info("Target channel count (user input) matches the WAV file's native channel count.")
 
 
         # --- 3. Determine Target PyAudio Format ---
@@ -167,12 +191,16 @@ def play_test_audio(filepath, device_index, target_rate, target_bit_depth, targe
         p = pyaudio.PyAudio()
 
         # --- 5. Open PyAudio Stream ---
-        logging.info(f"Attempting to open stream on device {device_index} with TARGET settings...")
+        # CRITICAL FIX: Use native_channels from the WAV file here!
+        logging.info(f"Attempting to open stream on device {device_index} using:")
+        logging.info(f"  Rate: {target_rate} Hz")
+        logging.info(f"  Format: {target_format} ({target_bit_depth}-bit)")
+        logging.info(f"  Channels: {native_channels} (from WAV file)") # Explicitly state using native
         stream_start_time = time.time()
         try:
             stream = p.open(
                 format=target_format,
-                channels=target_channels,     # Use TARGET channels
+                channels=native_channels,     # <<< FIX: ALWAYS use channels from the WAV file
                 rate=target_rate,
                 output=True,
                 output_device_index=device_index,
@@ -186,10 +214,11 @@ def play_test_audio(filepath, device_index, target_rate, target_bit_depth, targe
             logging.error(f"!!!!!!!! FAILED TO OPEN STREAM on device {device_index} !!!!!!!!")
             logging.error(f"  Error: {e}")
             logging.error("  Common Causes:")
-            logging.error("    - Incorrect device index.")
-            logging.error("    - Device is busy or unavailable (check `alsamixer`, `pulseaudio`, etc.).")
-            logging.error(f"    - Device does *not* support the requested format ({target_rate} Hz, {target_channels} Ch, {target_bit_depth}-bit).")
-            logging.error("    - Insufficient permissions.")
+            logging.error("    - Incorrect device index (verify with --list).")
+            logging.error("    - Device is busy or unavailable (check `alsamixer`, `pulseaudio`, `aplay -l`, other apps).")
+            # Update format log in error message
+            logging.error(f"    - Device does *not* support the requested format ({target_rate} Hz, {native_channels} Ch, {target_bit_depth}-bit).")
+            logging.error("    - Insufficient permissions (rare for playback).")
             return False
         except Exception as e:
             logging.error(f"Unexpected error opening stream: {e}")
@@ -198,43 +227,42 @@ def play_test_audio(filepath, device_index, target_rate, target_bit_depth, targe
 
         # --- 6. Playback Loop ---
         logging.info("Starting playback loop...")
+        if target_channels_user_input != native_channels:
+             logging.info("  Note: Sending raw WAV data; no channel up/down-mixing is performed by this script.")
+
         data = wf.readframes(chunk_size)
         playback_start_time = time.time()
-        frames_written = 0
         io_warnings = 0
 
         while len(data) > 0:
             try:
-                # NOTE: If target_channels != native_channels, the data might need manipulation
-                #       before writing (e.g., duplicating mono to stereo, or mixing stereo to mono).
-                #       This basic script DOES NOT perform such manipulation. It sends the raw
-                #       WAV data assuming the channel count matches what the stream expects.
-                #       Mismatch here could lead to garbled audio or errors depending on driver.
                 stream.write(data)
-                # Calculate frames based on NATIVE properties, as that's what wf.readframes uses
-                frames_written += len(data) // (native_channels * native_width)
-                total_frames_read += chunk_size # Assume we read a full chunk initially
+                # Frame calculation uses native properties, which is correct for wf.readframes
+                # Calculate frames written in this chunk based on bytes read and file properties
+                frames_written_this_chunk = len(data) // (native_channels * native_width)
+                frames_written += frames_written_this_chunk
                 data = wf.readframes(chunk_size)
             except IOError as e:
-                logging.warning(f"IOError during playback: {e}. Check system load or try increasing chunk size.")
+                logging.warning(f"IOError during playback: {e}. Check system load or try changing chunk size.")
                 io_warnings += 1
             except Exception as e:
                 logging.error(f"Unexpected error during stream write: {e}")
-                break
+                break # Stop playback on unexpected error
 
-        # Get actual frames read accurately
+        # Get actual frames read accurately after loop using wf.tell()
         total_frames_read = wf.tell()
 
         logging.info("Waiting for stream buffer to empty...")
         stream_finish_wait_start = time.time()
-        stream.stop_stream()
+        if stream is not None and stream.is_active(): # Check if stream exists and is active before stopping
+            stream.stop_stream()
         playback_end_time = time.time()
         logging.info(f"Stream finished processing in {playback_end_time - stream_finish_wait_start:.3f} seconds.")
 
         actual_playback_duration = playback_end_time - playback_start_time
         logging.info("-" * 40)
         logging.info("Playback Loop Finished.")
-        logging.info(f"  Total frames read from file: {total_frames_read}")
+        logging.info(f"  Total frames read from file: {total_frames_read} (approx {frames_written} written to stream)") # Show both if they differ slightly
         logging.info(f"  IO Warnings during playback: {io_warnings}")
         logging.info(f"  Actual playback duration (write loop + buffer drain): {actual_playback_duration:.2f} seconds")
 
@@ -245,7 +273,7 @@ def play_test_audio(filepath, device_index, target_rate, target_bit_depth, targe
             if expected_duration_played > 0.01:
                 speed_ratio = actual_playback_duration / expected_duration_played
                 logging.info(f"  Playback Speed Ratio (Actual Duration / Expected Duration): {speed_ratio:.3f}")
-                if abs(speed_ratio - 1.0) > 0.05:
+                if abs(speed_ratio - 1.0) > 0.1: # Allow slightly larger tolerance (10%)
                     logging.warning("  -> Playback speed appears significantly different from normal (Ratio != 1.0).")
                     if native_rate != target_rate:
                          logging.warning("     This strongly correlates with the SAMPLE RATE MISMATCH noted earlier.")
@@ -269,8 +297,9 @@ def play_test_audio(filepath, device_index, target_rate, target_bit_depth, targe
         logging.info("Cleaning up resources...")
         if stream is not None:
             try:
+                # Make sure stream is stopped before closing
                 if not stream.is_stopped():
-                    stream.stop_stream()
+                   stream.stop_stream()
                 stream.close()
                 logging.info("Stream closed.")
             except Exception as e:
@@ -295,7 +324,10 @@ def get_int_input(prompt, min_val=None, max_val=None):
     """Helper function to get validated integer input."""
     while True:
         try:
-            value_str = input(prompt)
+            value_str = input(prompt).strip() # Strip whitespace
+            if not value_str: # Handle empty input
+                print("Input cannot be empty. Please enter a number.")
+                continue
             value = int(value_str)
             if min_val is not None and value < min_val:
                 print(f"Error: Value must be at least {min_val}.")
@@ -308,6 +340,9 @@ def get_int_input(prompt, min_val=None, max_val=None):
         except EOFError:
             logging.warning("\nInput stream ended. Exiting.")
             sys.exit(1)
+        except KeyboardInterrupt:
+            logging.warning("\nInput interrupted. Exiting.")
+            sys.exit(0)
 
 def get_validated_filepath(prompt):
      """Helper function to get a valid WAV file path."""
@@ -317,6 +352,8 @@ def get_validated_filepath(prompt):
             if not filepath:
                 print("Error: File path cannot be empty.")
                 continue
+            # Expand ~ to home directory
+            filepath = os.path.expanduser(filepath)
             if not filepath.lower().endswith(".wav"):
                 print("Error: File must have a .wav extension.")
                 continue
@@ -326,9 +363,10 @@ def get_validated_filepath(prompt):
             if not os.path.isfile(filepath):
                  print(f"Error: '{filepath}' is a directory, not a file.")
                  continue
+            # Basic read permission check
             try:
                 with open(filepath, 'rb') as f:
-                    f.read(1) # Try reading one byte
+                    f.read(1)
                 return filepath
             except IOError as e:
                  print(f"Error: Cannot read file '{filepath}'. Check permissions. ({e})")
@@ -336,6 +374,9 @@ def get_validated_filepath(prompt):
          except EOFError:
              logging.warning("\nInput stream ended. Exiting.")
              sys.exit(1)
+         except KeyboardInterrupt:
+            logging.warning("\nInput interrupted. Exiting.")
+            sys.exit(0)
 
 
 # ================================================
@@ -358,9 +399,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "-b", "--bits", type=int, choices=[16, 24], help="Target bit depth (16 or 24)."
     )
-    # New argument for channels
     parser.add_argument(
-        "-ch", "--channels", type=int, help="Target number of output channels (e.g., 1 for mono, 2 for stereo)."
+        "-ch", "--channels", type=int,
+        help="Target number of output channels (e.g., 1=Mono, 2=Stereo). NOTE: Stream will open using channels from WAV file for correct speed."
     )
     parser.add_argument(
         "-c", "--chunk", type=int, default=DEFAULT_CHUNK_SIZE,
@@ -387,6 +428,8 @@ if __name__ == "__main__":
         print("\nNo WAV file specified via --file argument.")
         wav_filepath = get_validated_filepath("Enter the full path to the WAV file: ")
     else:
+        # Expand ~ and validate argument path
+        wav_filepath = os.path.expanduser(wav_filepath)
         if not wav_filepath.lower().endswith(".wav"):
              logging.error(f"Error: Specified file '{wav_filepath}' does not end with .wav")
              sys.exit(1)
@@ -428,26 +471,29 @@ if __name__ == "__main__":
     if target_bit_depth is None:
          print("\nNo target bit depth specified via --bits argument.")
          while True:
-             depth = get_int_input("Enter the target bit depth (16 or 24): ")
-             if depth in [16, 24]:
-                 target_bit_depth = depth
-                 break
-             else:
-                 print("Error: Bit depth must be 16 or 24.")
+             try:
+                 depth = get_int_input("Enter the target bit depth (16 or 24): ")
+                 if depth in [16, 24]:
+                     target_bit_depth = depth
+                     break
+                 else:
+                     print("Error: Bit depth must be 16 or 24.")
+             except KeyboardInterrupt: # Allow exiting from loop
+                 logging.warning("\nInput interrupted. Exiting.")
+                 sys.exit(0)
     else:
          logging.info(f"Using target bit depth from argument: {target_bit_depth}-bit")
 
-    # 5. Target Channels (New)
-    target_channels = args.channels
-    if target_channels is None:
+    # 5. Target Channels (User Input)
+    target_channels_user = args.channels
+    if target_channels_user is None:
         print("\nNo target channel count specified via --channels argument.")
-        # Suggest common values
-        target_channels = get_int_input("Enter the target number of channels (e.g., 1=Mono, 2=Stereo): ", min_val=1)
+        target_channels_user = get_int_input("Enter the target number of channels (e.g., 1=Mono, 2=Stereo) for verification: ", min_val=1)
     else:
-        if target_channels <= 0:
+        if target_channels_user <= 0:
             logging.error("Error: Number of channels must be positive.")
             sys.exit(1)
-        logging.info(f"Using target channel count from argument: {target_channels}")
+        logging.info(f"Using target channel count (user input) from argument: {target_channels_user}")
 
 
     # 6. Chunk Size
@@ -467,14 +513,17 @@ if __name__ == "__main__":
     logging.info(f"  Output Device Index: {output_device_index}")
     logging.info(f"  Target Rate: {target_rate} Hz")
     logging.info(f"  Target Bit Depth: {target_bit_depth}-bit")
-    logging.info(f"  Target Channels: {target_channels}") # Log final channels
+    logging.info(f"  Target Channels (User Input): {target_channels_user}") # Log user input
     logging.info(f"  Chunk Size: {chunk_size}")
+    logging.info("  NOTE: Audio stream will be opened using channels read directly from the WAV file.")
     print("=" * 60 + "\n")
 
     try:
         confirm = input("Press Enter to start the test, or Ctrl+C to abort...")
+        if confirm: # Handle if user types something before Enter
+            logging.debug(f"User entered text before starting: {confirm}")
     except KeyboardInterrupt:
-        print("\nAborted by user.")
+        print("\nAborted by user before starting.")
         sys.exit(0)
     except EOFError:
         logging.warning("\nInput stream ended. Exiting.")
@@ -482,13 +531,13 @@ if __name__ == "__main__":
 
 
     # --- Run the playback test ---
-    # Pass target_channels to the function
+    # Pass target_channels_user to the function for logging/comparison
     play_test_audio(
         filepath=wav_filepath,
         device_index=output_device_index,
         target_rate=target_rate,
         target_bit_depth=target_bit_depth,
-        target_channels=target_channels, # Pass the value
+        target_channels_user_input=target_channels_user, # Pass the user value
         chunk_size=chunk_size
     )
 
