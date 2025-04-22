@@ -3,7 +3,7 @@
 Centralised STR hardware/audio/GPIO settings (plus vector store and AI model config).
 Focuses on robust audio device detection.
 
-ACTUALIZADO AHORA
+ACTUALIZADO TODO FUNCIONANDO
 """
 
 import os
