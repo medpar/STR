@@ -210,16 +210,16 @@ except Exception as e:
 MIC_DEVICE_INDEX: int = final_mic_index
 MIC_SAMPLE_RATE: int  = int(os.getenv("MIC_SAMPLE_RATE", "0")) # 0 lets PyAudio choose default rate
 MIC_CHANNELS: int     = int(os.getenv("MIC_CHANNELS",    "1"))
-MIC_CHUNK: int        = int(os.getenv("MIC_CHUNK",      "1024"))
+MIC_CHUNK: int        = int(os.getenv("MIC_CHUNK",      "512"))
 MIC_NORMALISE: bool   = os.getenv("MIC_NORMALISE",      "1") == "1"
 
 # ------------------------------------------------------------------#
 # Playback (PCM5102 DAC via PyAudio)
 # ------------------------------------------------------------------#
 DAC_PYAUDIO_INDEX: int = final_dac_index
-PLAYBACK_CHUNK: int    = 1024  # chunk size
+PLAYBACK_CHUNK: int    = 512  # chunk size
 # *** CHANGE: Set default output rate to 44.1kHz ***
-OUTPUT_SAMPLE_RATE: int = int(os.getenv("OUTPUT_SAMPLE_RATE", "64000")) # Default to 44.1kHz
+OUTPUT_SAMPLE_RATE: int = int(os.getenv("OUTPUT_SAMPLE_RATE", "44100")) # Default to 44.1kHz
 
 # ------------------------------------------------------------------#
 # GPIO – push‑button + LED
