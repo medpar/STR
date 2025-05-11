@@ -146,7 +146,7 @@ class RealtimeClient:
     def __init__(self, instructions, voice="alloy"):
         # WebSocket Configuration
         self.url = "wss://api.openai.com/v1/realtime"  # WebSocket URL
-        self.model = "gpt-4o-mini-realtime-preview"
+        self.model = "gpt-4o-realtime-preview"
         self.api_key = os.getenv("OPENAI_API_KEY")
         self.ws = None
         self.audio_handler = AudioHandler()
