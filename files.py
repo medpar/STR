@@ -115,7 +115,8 @@ class PDFManager:
         }
 
         context_prompt = self._get_file_context_prompt(filename)
-        full_question = f"{context_prompt}Answer the following question: {question}"
+        system_prompt = "Provide a natural, answer without any URLs, links, or references in your response. Answer in castillian spanish. Use european format for all dates and units. Your response should always be in plain text, DO NOT use markdown. Answer very very briefly in maximum one paragraph."
+        full_question = f"{context_prompt} {system_prompt} Answer the following question: {question}"
         log.info("Asking OpenAI with contextual question: %s", full_question)
 
         try:
