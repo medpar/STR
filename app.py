@@ -168,6 +168,11 @@ def _on_status_update(message: str):
     log.info(f"Realtime Status Update: {message}")
     socketio.emit("status", {"message": message}, namespace="/realtime")
 
+def _on_user_transcription(text: str):
+    """Callback for user transcriptions from RealtimeClient."""
+    log.info(f"User transcription received: {text}")
+    socketio.emit("user_transcription", {"text": text}, namespace="/realtime")
+
 # --- Initialize RealtimeClient ---
 try:
     realtime_client = RealtimeClient(
@@ -178,6 +183,7 @@ try:
         on_audio_chunk=_on_audio_chunk,
         on_response_done=_on_response_done,
         on_status_update=_on_status_update,
+        on_user_transcription=_on_user_transcription,
     )
     # Start the client's background asyncio loop
     realtime_client.start_background_loop()

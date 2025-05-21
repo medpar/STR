@@ -749,6 +749,15 @@
         }
       });
 
+      socket.on("user_transcription", (data) => {
+        console.log("User transcription received:", data);
+        const text = data.text;
+        if (text) {
+          appendBubble(realtimeFeed, text, "user");
+          currentBotBubble = null; // Reset for next bot response
+        }
+      });
+
       socket.on("text_delta", (d) => {
         const delta = d.delta || "";
         // console.log("Delta:", delta); // Debug log for delta

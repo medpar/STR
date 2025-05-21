@@ -192,7 +192,7 @@ class RealtimeClient:
     Communicates with the main Flask app via callbacks.
     **MODIFIED:** Resamples audio from NATIVE_MIC_RATE to API_AUDIO_RATE before sending.
     """
-    def __init__(self, instructions, voice, mic_index, on_text_delta, on_audio_chunk, on_response_done, on_status_update):
+    def __init__(self, instructions, voice, mic_index, on_text_delta, on_audio_chunk, on_response_done, on_status_update, on_user_transcription):
         self.instructions = instructions
         self.voice = voice
         self.mic_index = mic_index
@@ -205,6 +205,7 @@ class RealtimeClient:
         self.on_audio_chunk = on_audio_chunk
         self.on_response_done = on_response_done
         self.on_status_update = on_status_update
+        self.on_user_transcription = on_user_transcription
 
         self.audio_handler = AudioHandler(device_index=self.mic_index)
         self.ws = None
@@ -506,7 +507,21 @@ class RealtimeClient:
                  self.on_status_update("Ready.")
         # ... (other event types remain the same) ...
         elif event_type == "conversation.item.created":
-            pass # Informational
+            item = event.get("item", {})
+            if item.get("type") == "message" and item.get("role") == "user":
+                content = item.get("content", [])
+                if content and content[0].get("type") == "input_text": # Assuming transcription is input_text
+                    transcribed_text = content[0].get("text")
+                    if transcribed_text and self.on_user_transcription:
+                        try:
+                            self.on_user_transcription(transcribed_text)
+                            log.info(f"User transcription received: {transcribed_text[:50]}...")
+                        except Exception as e:
+                            log.error(f"Error calling on_user_transcription callback: {e}")
+            # Original pass for other item.created types or if conditions not met
+            else: # Added else to keep the informational log for other item types
+                log.debug(f"conversation.item.created: type={item.get('type')}, role={item.get('role')}")
+                pass # Informational if not user message with transcription
         elif event_type == "input_audio_buffer.speech_started":
             log.debug("Server VAD: Speech started")
         elif event_type == "input_audio_buffer.speech_stopped":
