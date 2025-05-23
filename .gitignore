@@ -1,4 +1,5 @@
 audio_files/
+uploads/
 **/__pycache__/
 **/*digest*.txt
 **/.DS_Store
