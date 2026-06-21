@@ -1,4 +1,4 @@
-# 📡 STR — AI‑Augmented FM Radio Broadcaster
+# 📡 AI‑Augmented FM Radio Broadcaster
 
 A classic VHF‑FM radio transmitter, supercharged with modern AI. Type or *speak* a request and a Raspberry Pi turns it into a synthetic‑voice broadcast that any ordinary FM receiver can pick up.
 
