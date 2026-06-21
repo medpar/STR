@@ -1,3 +1,4 @@
+.env
 audio_files/
 uploads/
 **/__pycache__/
