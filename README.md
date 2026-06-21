@@ -1,6 +1,6 @@
 # 📡 STR — AI‑Augmented FM Radio Broadcaster
 
-> A classic VHF‑FM radio transmitter, supercharged with modern AI. Type or *speak* a request and a Raspberry Pi turns it into a synthetic‑voice broadcast that any ordinary FM receiver can pick up.
+A classic VHF‑FM radio transmitter, supercharged with modern AI. Type or *speak* a request and a Raspberry Pi turns it into a synthetic‑voice broadcast that any ordinary FM receiver can pick up.
 
 <p>
   <img alt="Python" src="https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white">
@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/img/final-assembly.jpg" alt="Final assembly: Raspberry Pi, adaptation circuit, FM transmitter, monopole antenna and ground plane" width="640">
+  <img src="docs/img/final-assembly.jpg" alt="Final assembly: Raspberry Pi, adaptation circuit, FM transmitter, monopole antenna and ground plane" width="460">
 </p>
 
 ---
