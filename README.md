@@ -12,7 +12,7 @@ A classic VHF‑FM radio transmitter, supercharged with modern AI. Type or *spea
 </p>
 
 <p align="center">
-  <img src="docs/img/final-assembly.jpg" alt="Final assembly: Raspberry Pi, adaptation circuit, FM transmitter, monopole antenna and ground plane" width="460">
+  <img src="docs/img/final-build.jpg" alt="Final assembly: Raspberry Pi, adaptation circuit, FM transmitter, monopole antenna and ground plane" width="460">
 </p>
 
 ---
